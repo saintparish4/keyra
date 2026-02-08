@@ -1,0 +1,935 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rate Limit Monitor</title>
+    <style>
+      :root {
+        --bg: #090909;
+        --fg: #ffffff;
+        --fg-secondary: #8e8e93;
+        --fg-tertiary: #48484a;
+        --accent-green: #30d158;
+        --accent-red: #ff453a;
+        --font-family:
+          -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter",
+          "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+        --spacing-unit: 8px;
+        --radius-sm: 4px;
+        --radius-md: 12px;
+        --radius-pill: 999px;
+
+        --anim-speed: 0.3s;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      body {
+        background-color: var(--bg);
+        color: var(--fg);
+        font-family: var(--font-family);
+        height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        overflow: hidden;
+      }
+
+      .dashboard {
+        width: 100%;
+        max-width: 1200px;
+        height: 90vh;
+        display: grid;
+        grid-template-columns: 1fr 1fr 400px;
+        grid-template-rows: auto auto 1fr;
+        gap: 48px;
+        padding: 48px;
+      }
+
+      .header-section {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .meta-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        color: var(--fg-secondary);
+        font-size: 14px;
+        font-weight: 500;
+      }
+
+      .connection-status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .connection-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent-green);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      .connection-dot.disconnected {
+        background: var(--accent-red);
+        animation: none;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+
+      .progress-visual {
+        width: 100%;
+        height: 2px;
+        background: var(--fg-tertiary);
+        border-radius: 2px;
+        overflow: hidden;
+        position: relative;
+      }
+
+      .progress-fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 100%;
+        background: var(--fg);
+        width: 100%;
+        transition: width 0.15s linear;
+      }
+
+      .token-hero {
+        grid-column: 1 / 2;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 24px;
+      }
+
+      .hero-value {
+        font-size: 120px;
+        font-weight: 400;
+        letter-spacing: -4px;
+        line-height: 1;
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        transition: color 0.3s ease;
+      }
+
+      .hero-unit {
+        font-size: 32px;
+        font-weight: 500;
+        letter-spacing: -0.5px;
+        color: var(--fg);
+        opacity: 0.9;
+      }
+
+      .hero-label {
+        font-size: 20px;
+        color: var(--fg-secondary);
+        font-weight: 400;
+        line-height: 1.4;
+        max-width: 300px;
+      }
+
+      .controls {
+        display: flex;
+        gap: 16px;
+        margin-top: 32px;
+      }
+
+      button {
+        background: var(--fg-tertiary);
+        color: var(--fg);
+        border: none;
+        padding: 16px 32px;
+        border-radius: var(--radius-pill);
+        font-family: var(--font-family);
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      button.primary {
+        background: var(--fg);
+        color: var(--bg);
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+        opacity: 0.9;
+      }
+
+      button:active {
+        transform: translateY(1px);
+      }
+
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        transform: none;
+      }
+
+      .stats-grid {
+        grid-column: 2 / 3;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 48px;
+        padding-left: 24px;
+        border-left: 1px solid var(--fg-tertiary);
+      }
+
+      .stat-item {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .stat-value {
+        font-size: 48px;
+        font-weight: 400;
+        letter-spacing: -1px;
+        transition: color 0.3s ease;
+      }
+
+      .stat-label {
+        font-size: 16px;
+        color: var(--fg-secondary);
+      }
+
+      .feed-section {
+        grid-column: 3 / 4;
+        display: flex;
+        flex-direction: column;
+        background: #111;
+        border-radius: 24px;
+        padding: 24px;
+        overflow: hidden;
+        position: relative;
+      }
+
+      .feed-header {
+        font-size: 14px;
+        color: var(--fg-secondary);
+        margin-bottom: 24px;
+        display: flex;
+        justify-content: space-between;
+      }
+
+      .feed-list {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding-right: 8px;
+
+        scrollbar-width: thin;
+        scrollbar-color: var(--fg-tertiary) transparent;
+      }
+
+      .feed-list::-webkit-scrollbar {
+        width: 4px;
+      }
+      .feed-list::-webkit-scrollbar-thumb {
+        background-color: var(--fg-tertiary);
+        border-radius: 4px;
+      }
+
+      .feed-item {
+        font-size: 13px;
+        font-family: "SF Mono", "Menlo", "Cascadia Code", monospace;
+        display: grid;
+        grid-template-columns: 100px 1fr auto;
+        align-items: center;
+        gap: 12px;
+        opacity: 0;
+        animation: slideIn 0.3s forwards;
+        padding-bottom: 12px;
+        border-bottom: 1px solid #222;
+      }
+
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(-5px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+      }
+
+      .status-allowed {
+        color: var(--accent-green);
+      }
+      .status-rejected {
+        color: var(--accent-red);
+      }
+      .bg-allowed {
+        background-color: var(--accent-green);
+      }
+      .bg-rejected {
+        background-color: var(--accent-red);
+      }
+
+      .time {
+        color: var(--fg-secondary);
+      }
+
+      .text-secondary {
+        color: var(--fg-secondary);
+      }
+
+      .config-section {
+        grid-column: 1 / -1;
+        background: #111;
+        border-radius: 24px;
+        padding: 24px;
+        display: none;
+      }
+
+      .config-section.open {
+        display: block;
+      }
+
+      .config-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 24px;
+      }
+
+      .config-title {
+        font-size: 20px;
+        font-weight: 600;
+        color: var(--fg);
+      }
+
+      .config-form {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 24px;
+        margin-bottom: 24px;
+      }
+
+      .config-field {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .config-label {
+        font-size: 14px;
+        color: var(--fg-secondary);
+        font-weight: 500;
+      }
+
+      .config-input {
+        background: var(--bg);
+        border: 1px solid var(--fg-tertiary);
+        border-radius: var(--radius-md);
+        padding: 12px 16px;
+        color: var(--fg);
+        font-family: var(--font-family);
+        font-size: 16px;
+        transition: border-color 0.2s ease;
+      }
+
+      .config-input:focus {
+        outline: none;
+        border-color: var(--fg);
+      }
+
+      .config-actions {
+        display: flex;
+        gap: 12px;
+      }
+
+      .config-message {
+        margin-top: 16px;
+        padding: 12px;
+        border-radius: var(--radius-md);
+        font-size: 14px;
+        display: none;
+      }
+
+      .config-message.success {
+        display: block;
+        background: rgba(48, 209, 88, 0.1);
+        color: var(--accent-green);
+        border: 1px solid var(--accent-green);
+      }
+
+      .config-message.error {
+        display: block;
+        background: rgba(255, 69, 58, 0.1);
+        color: var(--accent-red);
+        border: 1px solid var(--accent-red);
+      }
+
+      .config-toggle {
+        background: transparent;
+        border: 1px solid var(--fg-tertiary);
+        color: var(--fg-secondary);
+        padding: 8px 16px;
+        border-radius: var(--radius-pill);
+        font-size: 14px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .config-toggle:hover {
+        border-color: var(--fg);
+        color: var(--fg);
+      }
+
+      @media (max-width: 1024px) {
+        .dashboard {
+          grid-template-columns: 1fr 1fr;
+          grid-template-rows: auto auto 1fr;
+          overflow-y: auto;
+          height: auto;
+          padding: 24px;
+        }
+        .feed-section {
+          grid-column: 1 / -1;
+          height: 400px;
+        }
+      }
+
+      @media (max-width: 768px) {
+        .dashboard {
+          grid-template-columns: 1fr;
+        }
+        .hero-value {
+          font-size: 80px;
+        }
+        .stats-grid {
+          border-left: none;
+          padding-left: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="dashboard">
+      <div class="header-section">
+        <div class="meta-row">
+          <span>Distributed Rate Limiter</span>
+          <div style="display: flex; gap: 16px; align-items: center">
+            <button
+              class="config-toggle"
+              onclick="toggleConfig()"
+              id="config-toggle-btn"
+            >
+              Configuration
+            </button>
+            <div class="connection-status">
+              <div class="connection-dot" id="conn-dot"></div>
+              <span id="conn-label" style="font-family: monospace"
+                >connecting...</span
+              >
+            </div>
+          </div>
+        </div>
+        <div class="progress-visual">
+          <div class="progress-fill" id="token-bar"></div>
+        </div>
+      </div>
+
+      <div class="config-section" id="config-section">
+        <div class="config-header">
+          <h2 class="config-title">Configuration</h2>
+        </div>
+        <form
+          class="config-form"
+          id="config-form"
+          onsubmit="updateConfig(event)"
+        >
+          <div class="config-field">
+            <label class="config-label" for="config-capacity">Capacity</label>
+            <input
+              type="number"
+              id="config-capacity"
+              class="config-input"
+              min="1"
+              required
+            />
+          </div>
+          <div class="config-field">
+            <label class="config-label" for="config-refill-rate"
+              >Refill Rate (tokens/sec)</label
+            >
+            <input
+              type="number"
+              id="config-refill-rate"
+              class="config-input"
+              min="0.1"
+              step="0.1"
+              required
+            />
+          </div>
+          <div class="config-field">
+            <label class="config-label" for="config-ttl">TTL (seconds)</label>
+            <input
+              type="number"
+              id="config-ttl"
+              class="config-input"
+              min="1"
+              required
+            />
+          </div>
+        </form>
+        <div class="config-actions">
+          <button
+            class="primary"
+            onclick="updateConfig(event)"
+            id="config-apply-btn"
+          >
+            Apply
+          </button>
+          <button onclick="resetConfig()" id="config-reset-btn">
+            Reset to Defaults
+          </button>
+        </div>
+        <div class="config-message" id="config-message"></div>
+      </div>
+
+      <div class="token-hero">
+        <div>
+          <div class="hero-value" id="hero-container">
+            <span id="token-count">0</span>
+            <span class="hero-unit">tokens</span>
+          </div>
+          <p class="hero-label">
+            Bucket capacity available.<br />
+            Refills at
+            <span style="color: #fff" id="refill-rate-label">? tokens/sec</span
+            >.
+          </p>
+        </div>
+
+        <div class="controls">
+          <button class="primary" onclick="sendRequest()" id="btn-send">
+            Send Request
+          </button>
+          <button onclick="sendBurst()" id="btn-burst">Burst (50)</button>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-item">
+          <span class="stat-value" id="total-reqs">0</span>
+          <span class="stat-label">Total Requests</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-value" id="allow-rate">100%</span>
+          <span class="stat-label">Success Rate</span>
+        </div>
+        <div class="stat-item">
+          <span
+            class="stat-value"
+            id="rejected-count"
+            style="color: var(--accent-red)"
+            >0</span
+          >
+          <span class="stat-label">Throttled</span>
+        </div>
+      </div>
+
+      <div class="feed-section">
+        <div class="feed-header">
+          <span>Live Traffic</span>
+          <span>Real-time</span>
+        </div>
+        <div class="feed-list" id="feed-list"></div>
+      </div>
+    </div>
+
+    <script>
+      // ── State ──────────────────────────────────────────────
+      let tokens = 0;
+      let maxTokens = 100;
+      let refillRate = 10;
+      let totalRequests = 0;
+      let rejectedRequests = 0;
+      let backendConnected = false;
+      let inflight = 0;
+
+      // ── DOM refs ───────────────────────────────────────────
+      const elTokenCount = document.getElementById("token-count");
+      const elTokenBar = document.getElementById("token-bar");
+      const elFeed = document.getElementById("feed-list");
+      const elTotal = document.getElementById("total-reqs");
+      const elRate = document.getElementById("allow-rate");
+      const elRejected = document.getElementById("rejected-count");
+      const elConnDot = document.getElementById("conn-dot");
+      const elConnLabel = document.getElementById("conn-label");
+      const elRefillRate = document.getElementById("refill-rate-label");
+      const elHero = document.getElementById("hero-container");
+      const elConfigSection = document.getElementById("config-section");
+      const elConfigCapacity = document.getElementById("config-capacity");
+      const elConfigRefillRate = document.getElementById("config-refill-rate");
+      const elConfigTtl = document.getElementById("config-ttl");
+      const elConfigMessage = document.getElementById("config-message");
+
+      // ── SSE: real-time decision events from /v1/ratelimit/dashboard/stats ──
+      let eventSource = null;
+      function startEventSource() {
+        if (eventSource) return;
+        try {
+          eventSource = new EventSource("/v1/ratelimit/dashboard/stats");
+          eventSource.onmessage = function (e) {
+            try {
+              const data = JSON.parse(e.data);
+              if (data.error) return;
+              const allowed = data.event_type === "rate_limit_allowed";
+              logRequest(allowed);
+              if (
+                data.apiKey === "dashboard-demo" &&
+                data.tokensRemaining != null
+              ) {
+                tokens = data.tokensRemaining;
+                updateDisplay();
+              }
+            } catch (_) {
+              /* ignore parse errors */
+            }
+          };
+          eventSource.onerror = function () {
+            if (eventSource) {
+              eventSource.close();
+              eventSource = null;
+            }
+            setTimeout(startEventSource, 3000);
+          };
+        } catch (_) {
+          /* EventSource not supported or CORS */
+        }
+      }
+
+      // ── Boot: check backend connectivity ───────────────────
+      (async function boot() {
+        try {
+          const res = await fetch("/dashboard/api/config");
+          if (!res.ok) throw new Error(res.statusText);
+          const cfg = await res.json();
+          maxTokens = cfg.capacity;
+          refillRate = cfg.refillRatePerSecond;
+          elRefillRate.textContent = `${refillRate} tokens/sec`;
+          // Populate config form
+          elConfigCapacity.value = cfg.capacity;
+          elConfigRefillRate.value = cfg.refillRatePerSecond;
+          elConfigTtl.value = cfg.ttlSeconds;
+          setConnected(true);
+          // Initial status fetch
+          await refreshStatus();
+          startEventSource();
+        } catch (e) {
+          console.warn(
+            "Backend unreachable, running client-side simulation",
+            e,
+          );
+          tokens = maxTokens;
+          setConnected(false);
+          startLocalRefill();
+        }
+        updateDisplay();
+      })();
+
+      // ── Periodically poll status when connected ───────────
+      setInterval(async () => {
+        if (backendConnected && inflight === 0) {
+          await refreshStatus();
+        }
+      }, 500);
+
+      // ── Connection indicator ───────────────────────────────
+      function setConnected(ok) {
+        backendConnected = ok;
+        elConnDot.classList.toggle("disconnected", !ok);
+        elConnLabel.textContent = ok
+          ? "live · backend"
+          : "offline · client sim";
+      }
+
+      // ── Backend communication ──────────────────────────────
+      async function refreshStatus() {
+        try {
+          const res = await fetch("/dashboard/api/status");
+          if (!res.ok) throw new Error(res.statusText);
+          const data = await res.json();
+          tokens = data.tokensRemaining;
+          maxTokens = data.limit;
+          updateDisplay();
+        } catch (_) {
+          // Silently degrade
+        }
+      }
+
+      async function apiCheck() {
+        try {
+          const res = await fetch("/dashboard/api/check", { method: "POST" });
+          const data = await res.json();
+          return {
+            allowed: data.allowed,
+            tokensRemaining: data.tokensRemaining ?? tokens,
+          };
+        } catch (_) {
+          // Fallback to local sim if network fails
+          return localCheck();
+        }
+      }
+
+      // ── Local fallback simulation ──────────────────────────
+      function localCheck() {
+        if (tokens >= 1) {
+          tokens -= 1;
+          return { allowed: true, tokensRemaining: tokens };
+        }
+        return { allowed: false, tokensRemaining: tokens };
+      }
+
+      function startLocalRefill() {
+        setInterval(() => {
+          if (tokens < maxTokens) {
+            tokens = Math.min(maxTokens, tokens + refillRate * 0.1);
+            updateDisplay();
+          }
+        }, 100);
+      }
+
+      // ── Actions ────────────────────────────────────────────
+      async function sendRequest() {
+        await processRequest();
+      }
+
+      async function sendBurst() {
+        const btn = document.getElementById("btn-burst");
+        btn.disabled = true;
+        let count = 0;
+        const iv = setInterval(async () => {
+          await processRequest();
+          count++;
+          if (count >= 50) {
+            clearInterval(iv);
+            btn.disabled = false;
+          }
+        }, 20);
+      }
+
+      async function processRequest() {
+        totalRequests++;
+        inflight++;
+
+        let result;
+        if (backendConnected) {
+          result = await apiCheck();
+        } else {
+          result = localCheck();
+        }
+
+        tokens = result.tokensRemaining;
+        if (!result.allowed) rejectedRequests++;
+
+        logRequest(result.allowed);
+        updateDisplay();
+        updateStats();
+        inflight--;
+      }
+
+      // ── Display helpers ────────────────────────────────────
+      function updateDisplay() {
+        const t = Math.floor(Math.max(0, tokens));
+        elTokenCount.textContent = t;
+
+        const pct = (tokens / maxTokens) * 100;
+        elTokenBar.style.width = `${pct}%`;
+
+        if (pct < 20) {
+          elTokenBar.style.backgroundColor = "var(--accent-red)";
+          elHero.style.color = "var(--accent-red)";
+        } else {
+          elTokenBar.style.backgroundColor = "var(--fg)";
+          elHero.style.color = "var(--fg)";
+        }
+      }
+
+      function updateStats() {
+        elTotal.textContent = totalRequests.toLocaleString();
+        elRejected.textContent = rejectedRequests.toLocaleString();
+
+        const successRate =
+          totalRequests === 0
+            ? 100
+            : ((totalRequests - rejectedRequests) / totalRequests) * 100;
+        elRate.textContent = `${successRate.toFixed(1)}%`;
+
+        elRate.style.color =
+          successRate < 95 ? "var(--accent-red)" : "var(--fg)";
+      }
+
+      function logRequest(allowed) {
+        const item = document.createElement("div");
+        item.className = "feed-item";
+
+        const now = new Date();
+        const timeStr =
+          now.toLocaleTimeString("en-US", {
+            hour12: false,
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }) +
+          "." +
+          String(now.getMilliseconds()).padStart(3, "0");
+
+        const statusClass = allowed ? "status-allowed" : "status-rejected";
+        const statusText = allowed ? "200 OK" : "429 TOO MANY";
+        const dotClass = allowed ? "bg-allowed" : "bg-rejected";
+
+        item.innerHTML = `
+                <span class="time">${timeStr}</span>
+                <span class="${statusClass}">${statusText}</span>
+                <span class="status-dot ${dotClass}"></span>
+            `;
+
+        elFeed.prepend(item);
+
+        // Cap the feed at 50 entries
+        while (elFeed.children.length > 50) {
+          elFeed.lastElementChild.remove();
+        }
+      }
+
+      // ── Configuration panel ─────────────────────────────────
+      function toggleConfig() {
+        elConfigSection.classList.toggle("open");
+      }
+
+      async function updateConfig(event) {
+        if (event) event.preventDefault();
+
+        if (!backendConnected) {
+          showConfigMessage(
+            "Backend not connected. Configuration changes require a live connection.",
+            "error",
+          );
+          return;
+        }
+
+        const capacity = parseInt(elConfigCapacity.value);
+        const refillRate = parseFloat(elConfigRefillRate.value);
+        const ttlSeconds = parseInt(elConfigTtl.value);
+
+        // Client-side validation
+        if (capacity <= 0 || refillRate <= 0 || ttlSeconds <= 0) {
+          showConfigMessage("All values must be positive numbers.", "error");
+          return;
+        }
+
+        try {
+          const res = await fetch("/dashboard/api/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              capacity: capacity,
+              refillRatePerSecond: refillRate,
+              ttlSeconds: ttlSeconds,
+            }),
+          });
+
+          if (!res.ok) {
+            const error = await res.json();
+            showConfigMessage(
+              error.error || "Failed to update configuration",
+              "error",
+            );
+            return;
+          }
+
+          const data = await res.json();
+          maxTokens = data.capacity;
+          refillRate = data.refillRatePerSecond;
+          elRefillRate.textContent = `${refillRate} tokens/sec`;
+
+          // Refresh status to get updated bucket state
+          await refreshStatus();
+          showConfigMessage("Configuration updated successfully", "success");
+
+          // Clear message after 3 seconds
+          setTimeout(() => {
+            elConfigMessage.classList.remove("success", "error");
+          }, 3000);
+        } catch (e) {
+          showConfigMessage("Network error: " + e.message, "error");
+        }
+      }
+
+      async function resetConfig() {
+        if (!backendConnected) {
+          showConfigMessage(
+            "Backend not connected. Cannot reset to defaults.",
+            "error",
+          );
+          return;
+        }
+
+        try {
+          const res = await fetch("/dashboard/api/config");
+          if (!res.ok) throw new Error(res.statusText);
+          const cfg = await res.json();
+
+          elConfigCapacity.value = cfg.capacity;
+          elConfigRefillRate.value = cfg.refillRatePerSecond;
+          elConfigTtl.value = cfg.ttlSeconds;
+
+          showConfigMessage("Form reset to current configuration", "success");
+          setTimeout(() => {
+            elConfigMessage.classList.remove("success", "error");
+          }, 3000);
+        } catch (e) {
+          showConfigMessage("Failed to load current configuration", "error");
+        }
+      }
+
+      function showConfigMessage(text, type) {
+        elConfigMessage.textContent = text;
+        elConfigMessage.className = "config-message " + type;
+      }
+    </script>
+  </body>
+</html>

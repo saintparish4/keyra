@@ -12,6 +12,7 @@ import org.http4s.AuthedRoutes
 import org.typelevel.log4cats.Logger
 
 import cats.effect.*
+import cats.effect.std.Queue
 import cats.syntax.all.*
 import io.circe.generic.auto.*
 import io.circe.syntax.*
@@ -37,6 +38,7 @@ class Routes[F[_]: Async](
     authMiddleware: AuthMiddleware[F, AuthenticatedClient],
     rateLimitConfig: RateLimitConfig,
     logger: Logger[F],
+    dashboardApi: DashboardApi[F],
 ) extends Http4sDsl[F]:
 
   private val rateLimitApi = RateLimitApi[F](
@@ -97,8 +99,9 @@ class Routes[F[_]: Async](
           client => idempotencyApi.complete(key, req.req, client)
     }
 
-  // Combined routes
-  val routes: HttpRoutes[F] = publicRoutes <+> authMiddleware(authedRoutes)
+  // Combined routes — dashboard is public, API routes require auth
+  val routes: HttpRoutes[F] =
+    dashboardApi.routes <+> publicRoutes <+> authMiddleware(authedRoutes)
 
   def httpApp: HttpApp[F] = Router("/" -> routes).orNotFound
 
@@ -118,12 +121,24 @@ object Routes:
       authMiddleware: AuthMiddleware[F, AuthenticatedClient],
       rateLimitConfig: RateLimitConfig,
       logger: Logger[F],
-  ): Routes[F] = new Routes[F](
-    rateLimitStore,
-    idempotencyStore,
-    eventPublisher,
-    metricsPublisher,
-    authMiddleware,
-    rateLimitConfig,
-    logger,
-  )
+      dashboardEventQueue: Option[Queue[F, RateLimitEvent]] = None,
+  ): F[Routes[F]] =
+    for
+      dashboardApi <- DashboardApi.apply[F](
+        rateLimitStore,
+        rateLimitConfig,
+        logger,
+        dashboardEventQueue,
+        eventPublisher,
+      )
+      routes = new Routes[F](
+        rateLimitStore,
+        idempotencyStore,
+        eventPublisher,
+        metricsPublisher,
+        authMiddleware,
+        rateLimitConfig,
+        logger,
+        dashboardApi,
+      )
+    yield routes

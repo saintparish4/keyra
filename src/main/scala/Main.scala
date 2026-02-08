@@ -9,7 +9,8 @@ import org.typelevel.log4cats.Logger
 import api.Routes
 import config.*
 import core.*
-import events.*
+import events.{BroadcastingEventPublisher, EventPublisher, KinesisPublisher, RateLimitEvent}
+import cats.effect.std.Queue
 import _root_.metrics.MetricsPublisher
 import resilience.*
 import security.*
@@ -39,16 +40,20 @@ object Main extends IOApp:
         case false => Resource.pure[IO, MetricsPublisher[IO]](MetricsPublisher.noop[IO])
       _ <- Resource.eval(logger.info("Metrics publisher initialized"))
 
-      // Initialize event publisher
-      eventPublisher <- config.kinesis.enabled match
-        case true => 
+      // Initialize event publisher (underlying: Kinesis or noop)
+      underlyingEventPublisher <- config.kinesis.enabled match
+        case true =>
           for
             kinesisClient <- AwsClients.kinesisClient[IO](config.aws, config.dynamodb)
             kinesisPublisher = new KinesisPublisher[IO](kinesisClient, config.kinesis)
-          yield kinesisPublisher
-        case false => 
+          yield (kinesisPublisher: EventPublisher[IO])
+        case false =>
           Resource.pure[IO, EventPublisher[IO]](EventPublisher.noop[IO])
       _ <- Resource.eval(logger.info("Event publisher initialized"))
+
+      // Bounded queue for dashboard SSE; wrap publisher to broadcast events
+      dashboardQueue <- Resource.eval(Queue.bounded[IO, RateLimitEvent](512))
+      eventPublisher = BroadcastingEventPublisher(underlyingEventPublisher, dashboardQueue)
 
       // Initialize rate limit store
       rateLimitStore <- config.aws.localstack match
@@ -101,16 +106,17 @@ object Main extends IOApp:
       // Create authentication middleware
       authMiddleware = ApiKeyAuth.middleware[IO](apiKeyStore, Some(authRateLimiter))
 
-      // Create HTTP routes
-      routes = Routes[IO](
+      // Create HTTP routes (dashboard SSE receives events via dashboardQueue)
+      routes <- Resource.eval(Routes[IO](
         rateLimitStore,
         idempotencyStore,
         eventPublisher,
         metricsPublisher,
         authMiddleware,
         config.rateLimit,
-        logger
-      )
+        logger,
+        Some(dashboardQueue),
+      ))
       _ <- Resource.eval(logger.info("HTTP routes initialized"))
 
       // Start server

@@ -21,6 +21,9 @@ local.sbt
 # VS Code
 .vscode/
 
+# Cursor
+.cursor/
+
 # Metals
 .bloop/
 .metals/
@@ -85,3 +88,4 @@ tfplan*
 # Documentation for features not yet tested/implemented
 docs/DEPLOYMENT.md
 docs/RUNBOOK.md
+TESTING_DASHBOARD.md

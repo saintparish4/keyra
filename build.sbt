@@ -1,43 +1,44 @@
 val scala3Version = "3.7.4"
 val Http4sVersion = "0.23.32"
 val CirceVersion = "0.14.15"
-val CatsEffectVersion = "3.6.3" 
-val AwsSdkVersion = "2.38.7" 
+val CatsEffectVersion = "3.6.3"
+val AwsSdkVersion = "2.38.7"
 
 libraryDependencies ++= Seq(
- // HTTP4s
+  // HTTP4s
   "org.http4s" %% "http4s-ember-server" % Http4sVersion,
   "org.http4s" %% "http4s-ember-client" % Http4sVersion,
   "org.http4s" %% "http4s-circe" % Http4sVersion,
   "org.http4s" %% "http4s-dsl" % Http4sVersion,
-  
+
   // JSON
   "io.circe" %% "circe-generic" % CirceVersion,
   "io.circe" %% "circe-parser" % CirceVersion,
-  
+
   // Cats Effect
   "org.typelevel" %% "cats-effect" % CatsEffectVersion,
-  
+  "org.typelevel" %% "cats-effect-std" % CatsEffectVersion,
+
   // AWS SDK
   "software.amazon.awssdk" % "dynamodb" % AwsSdkVersion,
   "software.amazon.awssdk" % "kinesis" % AwsSdkVersion,
   "software.amazon.awssdk" % "cloudwatch" % AwsSdkVersion,
   "software.amazon.awssdk" % "secretsmanager" % AwsSdkVersion,
-  
+
   // Config
   "com.github.pureconfig" %% "pureconfig-core" % "0.17.9",
-  
+
   // Caching
   "com.github.ben-manes.caffeine" % "caffeine" % "3.1.8",
-  
+
   // Logging
   "ch.qos.logback" % "logback-classic" % "1.5.19",
   "org.typelevel" %% "log4cats-slf4j" % "2.7.1",
-  
+
   // Testing
   "org.scalatest" %% "scalatest" % "3.2.19" % Test,
   "org.typelevel" %% "cats-effect-testing-scalatest" % "1.7.0" % Test,
-  "org.testcontainers" % "localstack" % "1.21.4" % Test
+  "org.testcontainers" % "localstack" % "1.21.4" % Test,
 )
 
 // Docker plugin
@@ -46,13 +47,22 @@ enablePlugins(JavaAppPackaging, DockerPlugin)
 dockerBaseImage := "eclipse-temurin:17-jre"
 dockerExposedPorts := Seq(8080)
 
-lazy val root = project
-  .in(file("."))
-  .settings(
-    name := "scalax",
-    version := "0.1.0-SNAPSHOT",
+lazy val root = project.in(file(".")).settings(
+  name := "scalax",
+  version := "0.1.0-SNAPSHOT",
+  scalaVersion := scala3Version,
+  libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test,
+)
 
-    scalaVersion := scala3Version,
-
-    libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test
-  )
+lazy val loadSim = project.in(file("loadSim")).settings(
+  name := "scalax-load-sim",
+  scalaVersion := scala3Version,
+  libraryDependencies ++= Seq(
+    "org.typelevel" %% "cats-effect" % CatsEffectVersion,
+    "org.typelevel" %% "cats-effect-std" % CatsEffectVersion,
+    "org.http4s" %% "http4s-ember-client" % Http4sVersion,
+    "org.http4s" %% "http4s-circe" % Http4sVersion,
+    "io.circe" %% "circe-generic" % CirceVersion,
+    "io.circe" %% "circe-parser" % CirceVersion,
+  ),
+)
