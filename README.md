@@ -4,7 +4,26 @@
 [![Scala](https://img.shields.io/badge/scala-3.7.4-red.svg)](https://www.scala-lang.org/)
 [![CI](https://github.com/your-org/scalax/workflows/CI/badge.svg)](https://github.com/your-org/scalax/actions)
 
-Distributed rate limiting and idempotency platform built with Scala 3 and deployed on AWS. Demonstrates advanced backend engineering, functional programming, and cloud-native architecture.
+### Guarantees
+
+- **At-most-X RPS per key globally.** Each key is limited by a token bucket: configurable **capacity** (burst cap) and **refill rate** (tokens per second). Tokens never exceed capacity; consumption is bounded so that over any window, allowed requests respect the configured rate.
+- **Correctness under concurrent updates.** The rate limiter uses **optimistic concurrency control (OCC)** on DynamoDB: conditional writes on a version field ensure only one successful update per logical state change. Under contention we retry (fixed 1ms delay, max 10 retries); after exhaustion we reject to preserve safety.
+- **Idempotent writes within a time window.** Idempotency is **first-writer-wins** across instances. The first successful write for an idempotency key wins; duplicates within the key’s **TTL** (configurable; e.g. 24h default for idempotency check, 1h for rate-limit bucket state) receive the stored response. TTL and DynamoDB cleanup prevent unbounded growth.
+
+### Failure modes designed for
+
+- **Partial DynamoDB outages:** Retries with backoff (DynamoDB client and resilience config), plus a **circuit breaker** around DynamoDB so repeated failures stop hammering the store; metrics record circuit state for alerting.
+- **Instance crashes:** Services are **stateless**; all rate-limit and idempotency state lives in DynamoDB. Any instance can serve any request; restarts do not lose consistency.
+- **Clock skew:** Token refill and idempotency use **Clock.realTime** (wall clock) for timestamps; refill uses elapsed time between reads. Instances should have synchronized clocks—large skew between instances could affect refill and TTL accuracy (documented trade-off).
+- **Retries (client and internal):** Idempotency keys make client retries safe (same key returns the same result). OCC retries are bounded (max 10) so we fail predictably under extreme contention instead of spinning.
+
+### What this system is built around
+
+1. **Distributed token-bucket rate limiting with OCC on DynamoDB** — correct, coordinated consumption across instances without a separate lock service.
+2. **Distributed idempotency with first-writer-wins** — exactly-once semantics for critical operations across replicas.
+3. **Event streaming and observability** — rate-limit decisions are published to **Kinesis** with **fire-and-forget** semantics (no back-pressure on the request path). Observability today means: structured logs, health/ready endpoints, and CloudWatch metrics (allowed/blocked, latency); optional back-pressure or consumer lag handling would be a separate design.
+
+---
 
 **Note:** AWS deployment and performance have not been tested; the stack is designed for AWS but validated locally (e.g. LocalStack/Docker).
 

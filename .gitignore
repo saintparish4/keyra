@@ -45,6 +45,7 @@ logs/
 test-output/
 
 # Misc
+book/
 *.swp
 *.swo
 *~
