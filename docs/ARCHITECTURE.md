@@ -78,6 +78,31 @@
 | `version` | N | Version for conditional updates. |
 | `ttl` | N | Expiration (epoch seconds) for DynamoDB TTL cleanup. |
 
+#### Idempotency – schema and semantics
+
+**Key schema**
+
+- Partition key: `pk = "idempotency#<key>"` where `<key>` is the client-supplied idempotency key (e.g. `payment:abc-123`). One DynamoDB item per idempotency key. All reads use **consistent read** so callers see up-to-date status.
+
+**TTL policy**
+
+- Each item has a `ttl` attribute (N, epoch seconds). It is set at **create time** to `now_epoch_seconds + ttlSeconds`, where `ttlSeconds` is supplied by the client on `POST /v1/idempotency/check` (or a server default, e.g. 24 hours). DynamoDB TTL deletes items after the `ttl` time has passed; deletion is asynchronous (typically within a few days). Until deletion, the key is treated as the same logical request for replay; after expiry, a new request with the same key is allowed (first writer wins again).
+
+**First writer wins**
+
+- **Check:** The first successful **PutItem** with condition `attribute_not_exists(pk) OR status = :failed` wins. That writer creates a record in status `Pending` and receives **New** — the client should perform the operation. Any later caller for the same key gets **GetItem** and receives **InProgress** (status `Pending`) or **Duplicate** (status `Completed`, with stored response). If the record was in status `Failed`, a new writer can win by creating a new `Pending` record (condition allows `status = Failed`).
+- **Complete:** Only the creator can complete: **UpdateItem** with condition `status = :pending` sets `status = Completed` and stores the response. Duplicate complete calls fail the condition and do not overwrite.
+
+**Same request retried vs new unique request**
+
+- **Same request (retry/replay):** Same idempotency key and the item still exists (within TTL). The client is retrying; the service returns **InProgress** (work not yet completed) or **Duplicate** (work already completed, with stored response). No second operation is executed.
+- **New unique request:** Either (1) a different idempotency key, or (2) the same key but the previous item has expired (TTL passed and DynamoDB has removed it). In case (2), a new **PutItem** succeeds (`attribute_not_exists(pk)`), the client receives **New**, and may perform a new operation. Clients must use a unique key per logical operation and the same key for retries of that operation.
+
+**Unbounded growth prevention**
+
+- **TTL on every item:** Every idempotency record has a `ttl` set at creation. DynamoDB TTL automatically deletes items after that time, so the table does not grow without bound for old keys.
+- **Optional max TTL:** Configuration can cap the allowed `ttlSeconds` (e.g. max 24h or 7 days) so clients cannot set arbitrarily long retention. Server enforces a maximum TTL (e.g. config `idempotency.max-ttl-seconds`); client-supplied TTL above that is capped so retention is bounded.
+
 #### Main flows
 
 **Rate limit check path**

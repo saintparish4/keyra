@@ -117,6 +117,7 @@ object Main extends IOApp:
         metricsPublisher,
         authMiddleware,
         config.rateLimit,
+        config.idempotency,
         logger,
         Some(dashboardQueue),
       ))

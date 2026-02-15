@@ -20,7 +20,7 @@ import core.*
 import events.*
 import _root_.metrics.MetricsPublisher
 import security.*
-import config.RateLimitConfig
+import config.{IdempotencyConfig, RateLimitConfig}
 
 /** HTTP routes for the rate limiter API.
   *
@@ -37,6 +37,7 @@ class Routes[F[_]: Async](
     metricsPublisher: MetricsPublisher[F],
     authMiddleware: AuthMiddleware[F, AuthenticatedClient],
     rateLimitConfig: RateLimitConfig,
+    idempotencyConfig: IdempotencyConfig,
     logger: Logger[F],
     dashboardApi: DashboardApi[F],
 ) extends Http4sDsl[F]:
@@ -49,8 +50,13 @@ class Routes[F[_]: Async](
     logger,
   )
 
-  private val idempotencyApi =
-    IdempotencyApi[F](idempotencyStore, eventPublisher, metricsPublisher, logger)
+  private val idempotencyApi = IdempotencyApi[F](
+    idempotencyStore,
+    idempotencyConfig,
+    eventPublisher,
+    metricsPublisher,
+    logger,
+  )
 
   // Public routes (no auth required)
   private val publicRoutes: HttpRoutes[F] = HttpRoutes.of[F] {
@@ -120,6 +126,7 @@ object Routes:
       metricsPublisher: MetricsPublisher[F],
       authMiddleware: AuthMiddleware[F, AuthenticatedClient],
       rateLimitConfig: RateLimitConfig,
+      idempotencyConfig: IdempotencyConfig,
       logger: Logger[F],
       dashboardEventQueue: Option[Queue[F, RateLimitEvent]] = None,
   ): F[Routes[F]] =
@@ -138,6 +145,7 @@ object Routes:
         metricsPublisher,
         authMiddleware,
         rateLimitConfig,
+        idempotencyConfig,
         logger,
         dashboardApi,
       )

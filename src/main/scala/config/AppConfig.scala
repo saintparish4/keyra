@@ -79,6 +79,12 @@ case class RateLimitConfig(
     profiles: Map[String, RateLimitProfileConfig] = Map.empty
 ) derives ConfigReader
 
+// Idempotency TTL: default and max cap for client-supplied TTL
+case class IdempotencyConfig(
+    defaultTtlSeconds: Long = 86400,
+    maxTtlSeconds: Long = 86400
+) derives ConfigReader
+
 // Resilience configuration
 case class CircuitBreakerConfig(
     maxFailures: Int = 5,
@@ -129,6 +135,7 @@ case class AppConfig(
     dynamodb: DynamoDBConfig,
     kinesis: KinesisConfig,
     rateLimit: RateLimitConfig,
+    idempotency: IdempotencyConfig = IdempotencyConfig(),
     metrics: MetricsConfig = MetricsConfig(),
     security: SecurityConfig = SecurityConfig(
       authentication = AuthenticationConfig(),
@@ -147,6 +154,7 @@ object AppConfig:
         aws = AwsConfig("us-east-1", false, ""),
         dynamodb = DynamoDBConfig("rate-limits", "idempotency"),
         kinesis = KinesisConfig("rate-limit-events", false),
-        rateLimit = RateLimitConfig(100, 10.0, 3600, "token-bucket")
+        rateLimit = RateLimitConfig(100, 10.0, 3600, "token-bucket"),
+        idempotency = IdempotencyConfig()
       ))
     )

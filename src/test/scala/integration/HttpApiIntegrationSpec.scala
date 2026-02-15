@@ -12,7 +12,7 @@ import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import api.{DashboardApi, Routes, RateLimitCheckResponse, RateLimitStatusResponse}
-import config.{RateLimitConfig}
+import config.{IdempotencyConfig, RateLimitConfig}
 import events.EventPublisher
 import _root_.metrics.MetricsPublisher
 import security.{ApiKeyAuth, ApiKeyStore, AuthenticatedClient, ClientTier, Permission}
@@ -84,6 +84,11 @@ class HttpApiIntegrationSpec
     DashboardApi.apply[IO](rateLimitStore, testRateLimitConfig, logger, None, eventPublisher)
       .unsafeRunSync()
 
+  lazy val testIdempotencyConfig: IdempotencyConfig = IdempotencyConfig(
+    defaultTtlSeconds = 86400,
+    maxTtlSeconds = 86400,
+  )
+
   // Create routes
   lazy val routes: Routes[IO] = new Routes[IO](
     rateLimitStore,
@@ -92,6 +97,7 @@ class HttpApiIntegrationSpec
     metricsPublisher,
     authMiddleware,
     testRateLimitConfig,
+    testIdempotencyConfig,
     logger,
     dashboardApi,
   )

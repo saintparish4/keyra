@@ -14,6 +14,7 @@ import cats.effect.syntax.spawn.*
 import cats.syntax.all.*
 import io.circe.generic.auto.*
 import io.circe.syntax.*
+import config.IdempotencyConfig
 import core.*
 import events.*
 import _root_.metrics.MetricsPublisher
@@ -25,12 +26,11 @@ import security.*
   */
 class IdempotencyApi[F[_]: Async](
     store: IdempotencyStore[F],
+    idempotencyConfig: IdempotencyConfig,
     eventPublisher: EventPublisher[F],
     metricsPublisher: MetricsPublisher[F],
     logger: Logger[F],
 ) extends Http4sDsl[F]:
-
-  private val DefaultTtlSeconds = 86400L // 24 hours
 
   /** POST /v1/idempotency/check
     *
@@ -41,13 +41,21 @@ class IdempotencyApi[F[_]: Async](
       startTime <- Clock[F].realTime.map(_.toMillis)
       checkReq <- request.as[IdempotencyCheckRequest]
 
+      requestedTtl = checkReq.ttl.getOrElse(idempotencyConfig.defaultTtlSeconds)
+      ttlSeconds = math.min(requestedTtl, idempotencyConfig.maxTtlSeconds)
+      _ <- if requestedTtl > idempotencyConfig.maxTtlSeconds then
+        logger.warn(
+          s"Idempotency TTL capped: requested=$requestedTtl, max=${idempotencyConfig.maxTtlSeconds}, key=${checkReq.idempotencyKey}"
+        )
+      else ().pure[F]
+
       // Perform idempotency check
       _ <- logger.debug(s"Idempotency check: key=${checkReq
           .idempotencyKey}, client=${client.apiKeyId}")
       result <- store.check(
         checkReq.idempotencyKey,
         client.apiKeyId,
-        checkReq.ttl.getOrElse(DefaultTtlSeconds),
+        ttlSeconds,
       )
 
       // Record metrics
@@ -56,12 +64,7 @@ class IdempotencyApi[F[_]: Async](
 
       // Publish event (fire and forget)
       now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
-      _ <- publishEvent(
-        result,
-        client,
-        checkReq.ttl.getOrElse(DefaultTtlSeconds),
-        now,
-      ).start
+      _ <- publishEvent(result, client, ttlSeconds, now).start
 
       // Build response
       response <- buildCheckResponse(result)
@@ -213,8 +216,15 @@ case class IdempotencyCompleteResponse(
 object IdempotencyApi:
   def apply[F[_]: Async](
       store: IdempotencyStore[F],
+      idempotencyConfig: IdempotencyConfig,
       eventPublisher: EventPublisher[F],
       metricsPublisher: MetricsPublisher[F],
       logger: Logger[F],
   ): IdempotencyApi[F] =
-    new IdempotencyApi[F](store, eventPublisher, metricsPublisher, logger)
+    new IdempotencyApi[F](
+      store,
+      idempotencyConfig,
+      eventPublisher,
+      metricsPublisher,
+      logger,
+    )

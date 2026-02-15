@@ -138,6 +138,14 @@ Set rate-limit.algorithm = "token-bucket" or "leaky-bucket" in configuration (or
 - **TTL-Based Cleanup** - Automatic expiration of old keys
 - **Safe Retries** - Clients can safely retry failed requests
 
+**Idempotency – schema and semantics**
+
+- **Key:** One item per key; partition key is `idempotency#<key>`. Consistent reads ensure up-to-date status.
+- **TTL:** Set at creation (`now + ttlSeconds`). DynamoDB TTL deletes expired items so the table does not grow without bound.
+- **First writer wins:** First successful create (no existing key, or status `Failed`) gets **New**; others get **InProgress** or **Duplicate** with stored response. Complete is conditional on `status = Pending`.
+- **Same request vs new:** Same key within TTL = retry/replay (InProgress or Duplicate). Different key or same key after TTL expiry = new request (New).
+- **Config:** Per-request TTL via `POST /v1/idempotency/check` body field `ttl`, or server default (e.g. 24h). Server enforces a maximum TTL (`idempotency.max-ttl-seconds` or `IDEMPOTENCY_MAX_TTL_SECONDS`); client-supplied TTL above that is capped.
+
 ### Observability
 
 - **Structured Logging** - JSON logs with correlation IDs
