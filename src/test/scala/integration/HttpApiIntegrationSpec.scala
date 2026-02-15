@@ -11,7 +11,7 @@ import org.scalatest.matchers.should.Matchers
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
-import api.{Routes, RateLimitCheckResponse, RateLimitStatusResponse}
+import api.{DashboardApi, Routes, RateLimitCheckResponse, RateLimitStatusResponse}
 import config.{RateLimitConfig}
 import events.EventPublisher
 import _root_.metrics.MetricsPublisher
@@ -19,6 +19,7 @@ import security.{ApiKeyAuth, ApiKeyStore, AuthenticatedClient, ClientTier, Permi
 import storage.{DynamoDBIdempotencyStore, DynamoDBRateLimitStore}
 
 import cats.effect.IO
+import cats.effect.unsafe.implicits.global
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*
 import io.circe.generic.auto.*
@@ -27,7 +28,9 @@ import io.circe.parser.*
 /** Integration tests for HTTP API endpoints.
   *
   * Tests the full request/response cycle through the HTTP layer.
+  * Requires Docker (LocalStack). Without Docker, run unit tests only: sbt unitTest
   */
+@Integration
 class HttpApiIntegrationSpec
     extends AsyncFreeSpec
     with AsyncIOSpec
@@ -76,6 +79,11 @@ class HttpApiIntegrationSpec
   // Auth middleware
   lazy val authMiddleware = ApiKeyAuth.middleware[IO](testApiKeyStore, None)
 
+  // Dashboard API (no SSE queue for integration tests)
+  lazy val dashboardApi: DashboardApi[IO] =
+    DashboardApi.apply[IO](rateLimitStore, testRateLimitConfig, logger, None, eventPublisher)
+      .unsafeRunSync()
+
   // Create routes
   lazy val routes: Routes[IO] = new Routes[IO](
     rateLimitStore,
@@ -84,7 +92,8 @@ class HttpApiIntegrationSpec
     metricsPublisher,
     authMiddleware,
     testRateLimitConfig,
-    logger
+    logger,
+    dashboardApi,
   )
 
   lazy val httpApp: HttpApp[IO] = routes.httpApp

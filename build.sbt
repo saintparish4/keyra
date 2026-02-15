@@ -54,6 +54,13 @@ lazy val root = project.in(file(".")).settings(
   libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test,
 )
 
+// Run unit tests only (excludes integration tests that require Docker/LocalStack).
+// Note: for the rest of the sbt session, "test" will also exclude integration until you reload.
+addCommandAlias(
+  "unitTest",
+  """set Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-l", "integration.Integration") ; test""",
+)
+
 lazy val loadSim = project.in(file("loadSim")).settings(
   name := "scalax-load-sim",
   scalaVersion := scala3Version,

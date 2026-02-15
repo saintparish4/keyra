@@ -16,7 +16,9 @@ import cats.syntax.all.*
   *
   * These tests run against a real DynamoDB instance in LocalStack to verify
   * correct behavior including atomic operations.
+  * Requires Docker. Without Docker, run unit tests only: sbt unitTest
   */
+@Integration
 class DynamoDBRateLimitStoreIntegrationSpec
     extends AsyncFreeSpec
     with AsyncIOSpec

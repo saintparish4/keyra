@@ -64,6 +64,13 @@ object RateLimitProfile:
  * Implementations must provide atomic check-and-decrement semantics
  * to prevent race conditions under concurrent load.
  *
+ * == Token-bucket algorithm (contract for implementations) ==
+ * Refill formulas:
+ *   - elapsed_sec = (now_ms - lastRefillMs) / 1000
+ *   - tokens_to_add = elapsed_sec * refillRatePerSecond
+ *   - refilled = min(capacity, current_tokens + tokens_to_add)
+ * Invariants: tokens in [0, capacity]; version increments on every successful write.
+ *
  * @tparam F the effect type
  */
 trait RateLimitStore[F[_]]:
@@ -145,7 +152,7 @@ object RateLimitStore:
             decision <- stateRef.modify { buckets =>
               val current = buckets.getOrElse(key, BucketState(profile.capacity.toDouble, now, 0L))
               
-              // Refill tokens
+              // Token-bucket refill: elapsed_sec * refillRate, cap at capacity (see RateLimitStore doc)
               val elapsed = (now - current.lastRefillMs) / 1000.0
               val refilled = math.min(
                 profile.capacity.toDouble,

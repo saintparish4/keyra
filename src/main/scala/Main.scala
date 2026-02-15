@@ -55,18 +55,21 @@ object Main extends IOApp:
       dashboardQueue <- Resource.eval(Queue.bounded[IO, RateLimitEvent](512))
       eventPublisher = BroadcastingEventPublisher(underlyingEventPublisher, dashboardQueue)
 
-      // Initialize rate limit store
-      rateLimitStore <- config.aws.localstack match
-        case true =>
-          // Use in-memory for local development
+      // Initialize rate limit store (algorithm + backend)
+      rateLimitStore <- (config.aws.localstack, config.rateLimit.algorithm) match
+        case (true, _) =>
           Resource.eval(RateLimitStore.inMemory[IO])
-        case false =>
-          // Use DynamoDB for production
+        case (false, "leaky-bucket") =>
+          for
+            dynamoClient <- AwsClients.dynamoDbClient[IO](config.aws, config.dynamodb)
+            store = LeakyBucketRateLimitStore[IO](dynamoClient, config.dynamodb.rateLimitTable)
+          yield store
+        case (false, _) =>
           for
             dynamoClient <- AwsClients.dynamoDbClient[IO](config.aws, config.dynamodb)
             store = new DynamoDBRateLimitStore[IO](dynamoClient, config.dynamodb.rateLimitTable)
           yield store
-      _ <- Resource.eval(logger.info("Rate limit store initialized"))
+      _ <- Resource.eval(logger.info(s"Rate limit store initialized: ${config.rateLimit.algorithm}"))
 
       // Initialize idempotency store
       idempotencyStore <- config.aws.localstack match

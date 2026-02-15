@@ -75,6 +75,7 @@ case class RateLimitConfig(
     defaultCapacity: Int,
     defaultRefillRatePerSecond: Double,
     defaultTtlSeconds: Long,
+    algorithm: String = "token-bucket",
     profiles: Map[String, RateLimitProfileConfig] = Map.empty
 ) derives ConfigReader
 
@@ -146,6 +147,6 @@ object AppConfig:
         aws = AwsConfig("us-east-1", false, ""),
         dynamodb = DynamoDBConfig("rate-limits", "idempotency"),
         kinesis = KinesisConfig("rate-limit-events", false),
-        rateLimit = RateLimitConfig(100, 10.0, 3600)
+        rateLimit = RateLimitConfig(100, 10.0, 3600, "token-bucket")
       ))
     )

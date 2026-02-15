@@ -17,7 +17,9 @@ import java.time.Instant
 /** Integration tests for DynamoDBIdempotencyStore.
   *
   * Tests first-writer-wins semantics and response caching.
+  * Requires Docker. Without Docker, run unit tests only: sbt unitTest
   */
+@Integration
 class DynamoDBIdempotencyStoreIntegrationSpec
     extends AsyncFreeSpec
     with AsyncIOSpec

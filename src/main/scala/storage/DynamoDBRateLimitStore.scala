@@ -17,6 +17,23 @@ import core.{RateLimitDecision, RateLimitProfile, RateLimitStore}
  * Uses optimistic concurrency control (OCC) via version field to prevent
  * race conditions when multiple instances try to update the same key.
  *
+ * == Token-bucket math ==
+ * Refill is computed on each check using:
+ *   - elapsed_sec = (now_ms - lastRefillMs) / 1000
+ *   - tokens_to_add = elapsed_sec * refillRatePerSecond
+ *   - refilled = min(capacity, current_tokens + tokens_to_add)
+ * Burst cap: tokens never exceed capacity.
+ *
+ * == Invariants ==
+ *   - Tokens in [0, capacity] at all times.
+ *   - Version increments on every successful write (OCC).
+ *   - lastRefillMs is the timestamp at which refill was last applied (set to now on consume).
+ *
+ * == OCC (optimistic concurrency control) ==
+ * Conditional write: first write uses attribute_not_exists(pk); updates use version = :expectedVersion.
+ * Retry policy: 1 ms fixed delay, max 10 attempts total (initial + up to 9 retries) on ConditionalCheckFailedException.
+ * High contention: after 10 failed attempts we reject the request (no over-issuing of tokens).
+ *
  * Table Schema:
  * - pk (S): Partition key - "ratelimit#<key>"
  * - tokens (N): Current token count
@@ -50,7 +67,7 @@ class DynamoDBRateLimitStore[F[_]: Async](
       // Get current state
       currentState <- getOrInitState(key, profile, now)
       
-      // Calculate refilled tokens
+      // Token-bucket refill: elapsed_sec * refillRate, cap at capacity (see class doc)
       elapsed = (now - currentState.lastRefillMs) / 1000.0
       tokensToAdd = elapsed * profile.refillRatePerSecond
       refilledTokens = math.min(profile.capacity.toDouble, currentState.tokens + tokensToAdd)
@@ -65,12 +82,12 @@ class DynamoDBRateLimitStore[F[_]: Async](
             val resetAt = calculateResetAt(now, newTokens, profile)
             Async[F].pure(RateLimitDecision.Allowed(newTokens.toInt, resetAt))
           case false =>
-            // OCC conflict - retry with small delay to reduce contention
+            // OCC conflict: retry with 1ms delay, max MaxRetries total; then reject (see class doc)
             if retriesRemaining > 0 then
               Async[F].sleep(1.millis) *>
                 checkAndConsumeWithRetry(key, cost, profile, retriesRemaining - 1)
             else
-              // Give up, reject to be safe
+              // High contention: reject after max retries to avoid over-issuing
               val resetAt = calculateResetAt(now, refilledTokens, profile)
               Async[F].pure(RateLimitDecision.Rejected(1, resetAt))
         }
@@ -157,14 +174,14 @@ class DynamoDBRateLimitStore[F[_]: Async](
       .tableName(tableName)
       .item(item.asJava)
 
-    // Add conditional expression for OCC
+    // OCC: conditional write so only one writer wins. First write: attribute_not_exists(pk);
+    // subsequent: version = :expectedVersion. Caller retries on ConditionalCheckFailedException
+    // (1ms delay, max 10 attempts total); after that we reject (high contention).
     val request = if expectedVersion == 0L then
-      // First write - item should not exist
       requestBuilder
         .conditionExpression("attribute_not_exists(pk)")
         .build()
     else
-      // Update - version must match
       requestBuilder
         .conditionExpression("version = :expectedVersion")
         .expressionAttributeValues(Map(

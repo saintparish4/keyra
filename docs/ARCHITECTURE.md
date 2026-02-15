@@ -103,6 +103,25 @@
 2. Event is published to Kinesis (`PutRecord` or `PutRecords`) in a **fire-and-forget** manner (e.g. spawned fiber); the HTTP response is not delayed by Kinesis.
 3. Failures (throttling, network) are logged; no retry to the client and no back-pressure on the request path. Consumers (e.g. S3/Athena, real-time dashboards) read from the stream independently.
 
+#### Rate limit algorithms
+
+The service supports two algorithms behind the same RateLimitStore abstraction:
+
+- **Token bucket (default):** Refill by elapsed time; allows burst up to capacity. State: tokens, lastRefillMs, version. See "Rate limit table" and "Rate limit check path" above.
+- **Leaky bucket:** Drain (leak) by elapsed time; smooths output, no large burst. State: level, lastLeakMs, version. Same DynamoDB schema (tokens→level, lastRefillMs→lastLeakMs); same OCC and retry policy.
+
+Trade-offs:
+
+| Aspect     | Token bucket           | Leaky bucket              |
+|-----------|------------------------|----------------------------|
+| Bursts    | Allows burst to capacity | Smooths; no large burst  |
+| Fairness  | Burst then refill      | Steady drain over time    |
+| Complexity| Low (2 state vars)     | Low (2 state vars)        |
+| DynamoDB  | One item, OCC          | Same one item, OCC        |
+| Use case  | APIs that allow burst  | Strict smooth rate        |
+
+Selection is by configuration: rate-limit.algorithm = "token-bucket" | "leaky-bucket". When using DynamoDB, both can share the same table (one algorithm per deployment).
+
 ---
 
 ### Design alternatives

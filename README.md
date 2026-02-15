@@ -7,6 +7,7 @@
 ### Guarantees
 
 - **At-most-X RPS per key globally.** Each key is limited by a token bucket: configurable **capacity** (burst cap) and **refill rate** (tokens per second). Tokens never exceed capacity; consumption is bounded so that over any window, allowed requests respect the configured rate.
+- **Optional leaky bucket.** A second algorithm (leaky bucket) is available via configuration; it smooths output (no burst) instead of allowing burst up to capacity.
 - **Correctness under concurrent updates.** The rate limiter uses **optimistic concurrency control (OCC)** on DynamoDB: conditional writes on a version field ensure only one successful update per logical state change. Under contention we retry (fixed 1ms delay, max 10 retries); after exhaustion we reject to preserve safety.
 - **Idempotent writes within a time window.** Idempotency is **first-writer-wins** across instances. The first successful write for an idempotency key wins; duplicates within the key’s **TTL** (configurable; e.g. 24h default for idempotency check, 1h for rate-limit bucket state) receive the stored response. TTL and DynamoDB cleanup prevent unbounded growth.
 
@@ -112,12 +113,23 @@ The platform offers distributed rate limiting that works seamlessly across multi
 
 ### Rate Limiting
 
-- **Token Bucket Algorithm** - Implemented algorithm with burst handling
-- **Configurable Limits** - Per-user, per-API-key, per-endpoint limits
-- **Low-latency design** - Token bucket and DynamoDB tuned for fast checks (AWS not yet tested)
-- **Horizontal Scaling** - Designed to scale with ECS and DynamoDB (AWS not yet tested)
+- **Token Bucket Algorithm** - Default; allows burst up to capacity.
+- **Leaky Bucket Algorithm** - Optional; smooths output (steady drain), no large burst. Select via rate-limit.algorithm.
+- **Configurable Limits** - Per-user, per-API-key, per-endpoint limits.
+- **Low-latency design** - Token bucket and DynamoDB tuned for fast checks (AWS not yet tested).
+- **Horizontal Scaling** - Designed to scale with ECS and DynamoDB (AWS not yet tested).
 
-**Note:** Sliding window algorithm is not yet implemented.
+### Rate limit algorithms
+
+| Aspect     | Token bucket (default)   | Leaky bucket        |
+|-----------|--------------------------|---------------------|
+| Bursts    | Allows burst to capacity | Smooths; no burst   |
+| Fairness  | Burst then refill        | Steady drain        |
+| Complexity| Low (2 state vars)       | Low (2 state vars)  |
+| DynamoDB  | One item, OCC            | Same                |
+| Use case  | APIs that allow burst    | Strict smooth rate  |
+
+Set rate-limit.algorithm = "token-bucket" or "leaky-bucket" in configuration (or RATE_LIMIT_ALGORITHM env) to choose. Local development (localstack) uses in-memory store regardless of algorithm.
 
 ### Idempotency
 
@@ -217,7 +229,7 @@ curl -X POST http://localhost:8080/v1/ratelimit/check \
   }'
 ```
 
-**Note:** Use `test-api-key`, `admin-api-key`, or `free-api-key` for local development. The `algorithm` field is accepted but not currently used (only token bucket is implemented).
+**Note:** Use `test-api-key`, `admin-api-key`, or `free-api-key` for local development. Algorithm is selected by configuration (rate-limit.algorithm or RATE_LIMIT_ALGORITHM).
 
 **Response (Allowed):**
 ```json
