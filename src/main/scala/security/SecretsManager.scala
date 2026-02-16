@@ -153,25 +153,25 @@ object SecretsManagerStore:
       private def fetchAndCache(fullName: String): F[Option[String]] =
         val request = GetSecretValueRequest.builder().secretId(fullName).build()
 
-        Async[F].fromCompletableFuture(Async[F].delay(
-          client.getSecretValue(request),
-        )).flatMap { response =>
-          val value = response.secretString()
-          val versionId = Option(response.versionId())
+        Async[F]
+          .fromCompletableFuture(Async[F].delay(client.getSecretValue(request)))
+          .flatMap { response =>
+            val value = response.secretString()
+            val versionId = Option(response.versionId())
 
-          Clock[F].realTime.map(_.toMillis).flatMap(now =>
-            cacheRef
-              .update(_ + (fullName -> CachedSecret(value, now, versionId))) *>
-              logger.debug(s"Cached secret: $fullName (version: ${versionId
+            Clock[F].realTime.map(_.toMillis).flatMap(now =>
+              cacheRef.update(
+                _ + (fullName -> CachedSecret(value, now, versionId)),
+              ) *> logger.debug(s"Cached secret: $fullName (version: ${versionId
                   .getOrElse("unknown")})") *> Async[F].pure(Some(value)),
+            )
+          }.handleErrorWith(error =>
+            error match
+              case _: ResourceNotFoundException => logger
+                  .warn(s"Secret not found: $fullName") *> Async[F].pure(None)
+              case e => logger.error(e)(s"Failed to fetch secret: $fullName") *>
+                  Async[F].raiseError(e),
           )
-        }.handleErrorWith(error =>
-          error match
-            case _: ResourceNotFoundException => logger
-                .warn(s"Secret not found: $fullName") *> Async[F].pure(None)
-            case e => logger.error(e)(s"Failed to fetch secret: $fullName") *>
-                Async[F].raiseError(e),
-        )
 
       private def parsePermission(s: String): Option[Permission] =
         s.toLowerCase match

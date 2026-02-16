@@ -100,14 +100,27 @@ The platform offers distributed rate limiting that works seamlessly across multi
 - Scala 3.7.4+, SBT 1.9+
 - Docker 20.10+ (for local development)
 - AWS CLI 2.x (optional, for future AWS deployment)
-- Terraform 1.5+ (optional, for future AWS deployment)
+- Terraform 1.5+ (optional, for AWS deployment)
+
+## Infrastructure
+
+Terraform provisions DynamoDB (rate limit + idempotency), Kinesis, ECS Fargate, and an ALB. All variables are in [terraform/variables.tf](terraform/variables.tf); dev overrides are in [terraform/environments/dev.tfvars](terraform/environments/dev.tfvars) (or [demo.tfvars](terraform/environments/demo.tfvars)). **Required:** `container_image` (no default)—e.g. your ECR image URI.
+
+**Dev: plan and apply**
+
+```bash
+cd terraform
+terraform init
+terraform plan -var-file=environments/dev.tfvars -var="container_image=ACCOUNT.dkr.ecr.REGION.amazonaws.com/rate-limiter:latest"
+terraform apply -var-file=environments/dev.tfvars -var="container_image=ACCOUNT.dkr.ecr.REGION.amazonaws.com/rate-limiter:latest"
+```
+
+API endpoint after apply: `terraform output api_endpoint`.
 
 ## Documentation
 
 - **[API Reference](docs/API.md)** - Complete API documentation with examples
 - **[Architecture Decisions](docs/ARCHITECTURE.md)** - Design rationale and trade-offs
-
-**Note:** Deployment and operational runbooks are not yet available as AWS deployment has not been tested.
 
 ## Features
 
@@ -179,7 +192,7 @@ Set rate-limit.algorithm = "token-bucket" or "leaky-bucket" in configuration (or
 - S3 + Athena (analytics)
 
 **Infrastructure:**
-- Terraform (IaC - AWS deployment not yet tested)
+- Terraform (DynamoDB, Kinesis, ECS Fargate, ALB; see [Infrastructure](#infrastructure))
 - Docker (containerization)
 - LocalStack (local AWS emulation)
 

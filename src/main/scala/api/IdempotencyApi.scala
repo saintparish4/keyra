@@ -43,20 +43,18 @@ class IdempotencyApi[F[_]: Async](
 
       requestedTtl = checkReq.ttl.getOrElse(idempotencyConfig.defaultTtlSeconds)
       ttlSeconds = math.min(requestedTtl, idempotencyConfig.maxTtlSeconds)
-      _ <- if requestedTtl > idempotencyConfig.maxTtlSeconds then
-        logger.warn(
-          s"Idempotency TTL capped: requested=$requestedTtl, max=${idempotencyConfig.maxTtlSeconds}, key=${checkReq.idempotencyKey}"
-        )
-      else ().pure[F]
+      _ <-
+        if requestedTtl > idempotencyConfig.maxTtlSeconds then
+          logger.warn(
+            s"Idempotency TTL capped: requested=$requestedTtl, max=${idempotencyConfig
+                .maxTtlSeconds}, key=${checkReq.idempotencyKey}",
+          )
+        else ().pure[F]
 
       // Perform idempotency check
       _ <- logger.debug(s"Idempotency check: key=${checkReq
           .idempotencyKey}, client=${client.apiKeyId}")
-      result <- store.check(
-        checkReq.idempotencyKey,
-        client.apiKeyId,
-        ttlSeconds,
-      )
+      result <- store.check(checkReq.idempotencyKey, client.apiKeyId, ttlSeconds)
 
       // Record metrics
       latency <- Clock[F].realTime.map(_.toMillis - startTime)
@@ -220,11 +218,10 @@ object IdempotencyApi:
       eventPublisher: EventPublisher[F],
       metricsPublisher: MetricsPublisher[F],
       logger: Logger[F],
-  ): IdempotencyApi[F] =
-    new IdempotencyApi[F](
-      store,
-      idempotencyConfig,
-      eventPublisher,
-      metricsPublisher,
-      logger,
-    )
+  ): IdempotencyApi[F] = new IdempotencyApi[F](
+    store,
+    idempotencyConfig,
+    eventPublisher,
+    metricsPublisher,
+    logger,
+  )

@@ -1,51 +1,52 @@
 package core
 
-import scala.concurrent.duration.FiniteDuration
-import cats.effect.Temporal
-import java.time.Instant 
+import java.time.Instant
 
-/**
- * Result of a rate limit check.
- */
+import scala.concurrent.duration.FiniteDuration
+
+import cats.effect.Temporal
+
+/** Result of a rate limit check.
+  */
 sealed trait RateLimitDecision:
   def allowed: Boolean
 
 object RateLimitDecision:
-  /**
-   * Request is allowed within the rate limit.
-   *
-   * @param tokensRemaining Number of tokens remaining in the bucket
-   * @param resetAt When the bucket will be fully replenished
-   */
-  case class Allowed(
-      tokensRemaining: Int,
-      resetAt: Instant
-  ) extends RateLimitDecision:
+  /** Request is allowed within the rate limit.
+    *
+    * @param tokensRemaining
+    *   Number of tokens remaining in the bucket
+    * @param resetAt
+    *   When the bucket will be fully replenished
+    */
+  case class Allowed(tokensRemaining: Int, resetAt: Instant)
+      extends RateLimitDecision:
     val allowed: Boolean = true
 
-  /**
-   * Request is rejected due to rate limit exceeded.
-   *
-   * @param retryAfterSeconds Suggested retry delay
-   * @param resetAt When the bucket will be fully replenished
-   */
-  case class Rejected(
-      retryAfterSeconds: Int,
-      resetAt: Instant
-  ) extends RateLimitDecision:
+  /** Request is rejected due to rate limit exceeded.
+    *
+    * @param retryAfterSeconds
+    *   Suggested retry delay
+    * @param resetAt
+    *   When the bucket will be fully replenished
+    */
+  case class Rejected(retryAfterSeconds: Int, resetAt: Instant)
+      extends RateLimitDecision:
     val allowed: Boolean = false
 
-/**
- * Configuration for a rate limit profile.
- *
- * @param capacity Maximum tokens in the bucket
- * @param refillRatePerSecond Tokens added per second
- * @param ttlSeconds Time-to-live for the bucket state
- */
+/** Configuration for a rate limit profile.
+  *
+  * @param capacity
+  *   Maximum tokens in the bucket
+  * @param refillRatePerSecond
+  *   Tokens added per second
+  * @param ttlSeconds
+  *   Time-to-live for the bucket state
+  */
 case class RateLimitProfile(
     capacity: Int,
     refillRatePerSecond: Double,
-    ttlSeconds: Long
+    ttlSeconds: Long,
 ):
   require(capacity > 0, "Capacity must be positive")
   require(refillRatePerSecond > 0, "Refill rate must be positive")
@@ -55,64 +56,70 @@ object RateLimitProfile:
   val default: RateLimitProfile = RateLimitProfile(
     capacity = 100,
     refillRatePerSecond = 10.0,
-    ttlSeconds = 3600
+    ttlSeconds = 3600,
   )
 
-/**
- * Trait for rate limit storage backends.
- *
- * Implementations must provide atomic check-and-decrement semantics
- * to prevent race conditions under concurrent load.
- *
- * == Token-bucket algorithm (contract for implementations) ==
- * Refill formulas:
- *   - elapsed_sec = (now_ms - lastRefillMs) / 1000
- *   - tokens_to_add = elapsed_sec * refillRatePerSecond
- *   - refilled = min(capacity, current_tokens + tokens_to_add)
- * Invariants: tokens in [0, capacity]; version increments on every successful write.
- *
- * @tparam F the effect type
- */
+/** Trait for rate limit storage backends.
+  *
+  * Implementations must provide atomic check-and-decrement semantics to prevent
+  * race conditions under concurrent load.
+  *
+  * ==Token-bucket algorithm (contract for implementations)==
+  * Refill formulas:
+  *   - elapsed_sec = (now_ms - lastRefillMs) / 1000
+  *   - tokens_to_add = elapsed_sec * refillRatePerSecond
+  *   - refilled = min(capacity, current_tokens + tokens_to_add)
+  * Invariants: tokens in [0, capacity]; version increments on every successful
+  * write.
+  *
+  * @tparam F
+  *   the effect type
+  */
 trait RateLimitStore[F[_]]:
-  /**
-   * Check if a request is allowed and atomically consume tokens if so.
-   *
-   * This operation must be atomic - either the tokens are consumed and
-   * the request is allowed, or no tokens are consumed and the request
-   * is rejected. Race conditions must be handled via optimistic concurrency
-   * control or similar mechanisms.
-   *
-   * @param key Unique identifier for the rate limit bucket (e.g., "user:123")
-   * @param cost Number of tokens to consume (default 1)
-   * @param profile Rate limit configuration to apply
-   * @return Decision indicating whether request is allowed
-   */
+  /** Check if a request is allowed and atomically consume tokens if so.
+    *
+    * This operation must be atomic - either the tokens are consumed and the
+    * request is allowed, or no tokens are consumed and the request is rejected.
+    * Race conditions must be handled via optimistic concurrency control or
+    * similar mechanisms.
+    *
+    * @param key
+    *   Unique identifier for the rate limit bucket (e.g., "user:123")
+    * @param cost
+    *   Number of tokens to consume (default 1)
+    * @param profile
+    *   Rate limit configuration to apply
+    * @return
+    *   Decision indicating whether request is allowed
+    */
   def checkAndConsume(
       key: String,
       cost: Int,
-      profile: RateLimitProfile
+      profile: RateLimitProfile,
   ): F[RateLimitDecision]
 
-  /**
-   * Get current token count for a key without consuming.
-   *
-   * Used for status endpoints and monitoring. This is a read-only
-   * operation that does not modify state.
-   *
-   * @param key Unique identifier for the rate limit bucket
-   * @param profile Rate limit configuration (needed for refill calculation)
-   * @return Current bucket status, or None if bucket doesn't exist
-   */
+  /** Get current token count for a key without consuming.
+    *
+    * Used for status endpoints and monitoring. This is a read-only operation
+    * that does not modify state.
+    *
+    * @param key
+    *   Unique identifier for the rate limit bucket
+    * @param profile
+    *   Rate limit configuration (needed for refill calculation)
+    * @return
+    *   Current bucket status, or None if bucket doesn't exist
+    */
   def getStatus(
       key: String,
-      profile: RateLimitProfile
+      profile: RateLimitProfile,
   ): F[Option[RateLimitDecision.Allowed]]
 
-  /**
-   * Health check for the storage backend.
-   *
-   * @return true if the store is healthy and operational
-   */
+  /** Health check for the storage backend.
+    *
+    * @return
+    *   true if the store is healthy and operational
+    */
   def healthCheck: F[Boolean]
 
 // Internal state of a token bucket
@@ -123,56 +130,63 @@ case class TokenBucketState(
 ):
   def tokensInt: Int = tokens.toInt
 
-/**
- * Companion object with utility methods.
- */
+/** Companion object with utility methods.
+  */
 object RateLimitStore:
-  /**
-   * Create an in-memory store for testing.
-   */
+  /** Create an in-memory store for testing.
+    */
   def inMemory[F[_]: Temporal]: F[RateLimitStore[F]] =
     import cats.effect.Ref
     import cats.syntax.all.*
-    
-    case class BucketState(
-        tokens: Double,
-        lastRefillMs: Long,
-        version: Long
-    )
-    
+
+    case class BucketState(tokens: Double, lastRefillMs: Long, version: Long)
+
     Ref.of[F, Map[String, BucketState]](Map.empty).map { stateRef =>
       new RateLimitStore[F]:
         override def checkAndConsume(
             key: String,
             cost: Int,
-            profile: RateLimitProfile
+            profile: RateLimitProfile,
         ): F[RateLimitDecision] =
           for
             now <- cats.effect.Clock[F].realTime.map(_.toMillis)
             decision <- stateRef.modify { buckets =>
-              val current = buckets.getOrElse(key, BucketState(profile.capacity.toDouble, now, 0L))
-              
+              val current = buckets
+                .getOrElse(key, BucketState(profile.capacity.toDouble, now, 0L))
+
               // Token-bucket refill: elapsed_sec * refillRate, cap at capacity (see RateLimitStore doc)
               val elapsed = (now - current.lastRefillMs) / 1000.0
               val refilled = math.min(
                 profile.capacity.toDouble,
-                current.tokens + (elapsed * profile.refillRatePerSecond)
+                current.tokens + elapsed * profile.refillRatePerSecond,
               )
-              
+
               if refilled >= cost then
-                val newState = BucketState(refilled - cost, now, current.version + 1)
-                val resetAt = Instant.ofEpochMilli(now + ((profile.capacity - newState.tokens) / profile.refillRatePerSecond * 1000).toLong)
-                (buckets + (key -> newState), RateLimitDecision.Allowed(newState.tokens.toInt, resetAt))
+                val newState =
+                  BucketState(refilled - cost, now, current.version + 1)
+                val resetAt = Instant.ofEpochMilli(
+                  now +
+                    ((profile.capacity - newState.tokens) /
+                      profile.refillRatePerSecond * 1000).toLong,
+                )
+                (
+                  buckets + (key -> newState),
+                  RateLimitDecision.Allowed(newState.tokens.toInt, resetAt),
+                )
               else
-                val retryAfter = math.ceil((cost - refilled) / profile.refillRatePerSecond).toInt
-                val resetAt = Instant.ofEpochMilli(now + (profile.capacity / profile.refillRatePerSecond * 1000).toLong)
+                val retryAfter = math
+                  .ceil((cost - refilled) / profile.refillRatePerSecond).toInt
+                val resetAt = Instant.ofEpochMilli(
+                  now + (profile.capacity / profile.refillRatePerSecond * 1000)
+                    .toLong,
+                )
                 (buckets, RateLimitDecision.Rejected(retryAfter, resetAt))
             }
           yield decision
-        
+
         override def getStatus(
             key: String,
-            profile: RateLimitProfile
+            profile: RateLimitProfile,
         ): F[Option[RateLimitDecision.Allowed]] =
           for
             now <- cats.effect.Clock[F].realTime.map(_.toMillis)
@@ -181,14 +195,17 @@ object RateLimitStore:
                 val elapsed = (now - current.lastRefillMs) / 1000.0
                 val refilled = math.min(
                   profile.capacity.toDouble,
-                  current.tokens + (elapsed * profile.refillRatePerSecond)
+                  current.tokens + elapsed * profile.refillRatePerSecond,
                 )
-                val resetAt = Instant.ofEpochMilli(now + ((profile.capacity - refilled) / profile.refillRatePerSecond * 1000).toLong)
+                val resetAt = Instant.ofEpochMilli(
+                  now +
+                    ((profile.capacity - refilled) /
+                      profile.refillRatePerSecond * 1000).toLong,
+                )
                 RateLimitDecision.Allowed(refilled.toInt, resetAt)
               }
             }
           yield status
-        
-        override def healthCheck: F[Boolean] =
-          Temporal[F].pure(true)
+
+        override def healthCheck: F[Boolean] = Temporal[F].pure(true)
     }

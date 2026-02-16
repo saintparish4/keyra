@@ -5,7 +5,7 @@
 environment = "prod"
 
 # ECS Configuration (production-ready)
-desired_count = 2
+ecs_desired_count = 2
 ecs_cpu       = 512
 ecs_memory    = 1024
 

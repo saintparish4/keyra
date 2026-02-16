@@ -34,6 +34,12 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
+# -----------------------------------------------------------------------------
+# Production-like infrastructure
+# Provisions: DynamoDB (rate limit + idempotency), Kinesis stream,
+#             ECS Fargate service, ALB in front of Fargate
+# -----------------------------------------------------------------------------
+
 # Networking
 module "networking" {
   source = "./modules/networking"

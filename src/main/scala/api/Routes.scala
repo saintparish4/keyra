@@ -8,7 +8,6 @@ import org.http4s.circe.CirceEntityDecoder.*
 import org.http4s.circe.CirceEntityEncoder.*
 import org.http4s.dsl.Http4sDsl
 import org.http4s.server.{AuthMiddleware, Router}
-import org.http4s.AuthedRoutes
 import org.typelevel.log4cats.Logger
 
 import cats.effect.*
@@ -106,8 +105,8 @@ class Routes[F[_]: Async](
     }
 
   // Combined routes — dashboard is public, API routes require auth
-  val routes: HttpRoutes[F] =
-    dashboardApi.routes <+> publicRoutes <+> authMiddleware(authedRoutes)
+  val routes: HttpRoutes[F] = dashboardApi.routes <+> publicRoutes <+>
+    authMiddleware(authedRoutes)
 
   def httpApp: HttpApp[F] = Router("/" -> routes).orNotFound
 

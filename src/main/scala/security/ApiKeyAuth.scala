@@ -6,8 +6,8 @@ import org.http4s.*
 import org.http4s.dsl.io.*
 import org.http4s.headers.Authorization
 import org.http4s.server.AuthMiddleware
-import org.typelevel.log4cats.Logger
 import org.typelevel.ci.*
+import org.typelevel.log4cats.Logger
 
 import cats.data.{Kleisli, OptionT}
 import cats.effect.*
@@ -153,7 +153,8 @@ object ApiKeyAuth:
   ): AuthMiddleware[F, AuthenticatedClient] =
     val logger = Logger[F]
 
-    val authUser: Kleisli[[X] =>> OptionT[F, X], Request[F], AuthenticatedClient] =
+    val authUser
+        : Kleisli[[X] =>> OptionT[F, X], Request[F], AuthenticatedClient] =
       Kleisli { request =>
         OptionT {
           extractApiKey(request).flatMap {
@@ -214,14 +215,14 @@ object ApiKeyAuth:
     */
   def requirePermission[F[_]: Temporal](
       permission: Permission,
-  ): Kleisli[[X] =>> OptionT[F, X], AuthenticatedClient, AuthenticatedClient] = Kleisli(
-    client =>
+  ): Kleisli[[X] =>> OptionT[F, X], AuthenticatedClient, AuthenticatedClient] =
+    Kleisli(client =>
       OptionT(
         if client.permissions.contains(permission) then
           Temporal[F].pure(Some(client))
         else Temporal[F].pure(None),
       ),
-  )
+    )
 
 /** Rate limiter for authentication attempts. Protects against brute-force API
   * key guessing.
@@ -247,12 +248,11 @@ object AuthRateLimiter:
       .build[String, AtomicInteger]()
 
     new AuthRateLimiter[F]:
-      override def checkLimit(clientId: String): F[Boolean] = Sync[F]
-        .delay {
-          val counter = requestCounts.get(clientId, _ => new AtomicInteger(0))
-          val count = counter.incrementAndGet()
-          count <= maxRequestsPerMinute
-        }
+      override def checkLimit(clientId: String): F[Boolean] = Sync[F].delay {
+        val counter = requestCounts.get(clientId, _ => new AtomicInteger(0))
+        val count = counter.incrementAndGet()
+        count <= maxRequestsPerMinute
+      }
   }
 
 /** Request context enriched with authentication info.

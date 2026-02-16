@@ -5,7 +5,7 @@
 environment = "dev"
 
 # ECS Configuration (smaller for dev)
-desired_count = 1
+ecs_desired_count = 1
 ecs_cpu       = 256
 ecs_memory    = 512
 

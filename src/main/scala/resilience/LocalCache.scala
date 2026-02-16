@@ -160,9 +160,7 @@ private class CaffeineCache[F[_]: Sync, K <: AnyRef, V <: AnyRef](
   * for scenarios where eventual consistency is acceptable.
   */
 object CachedRateLimitStore:
-  import core.{
-    RateLimitDecision, RateLimitProfile, RateLimitStore,
-  }
+  import core.{RateLimitDecision, RateLimitProfile, RateLimitStore}
 
   /** Cached state for rate limit buckets. Only caches the "status" read, not
     * the atomic consume operation.
@@ -210,9 +208,9 @@ object CachedRateLimitStore:
           case Some(cached) => Clock[F].realTime.map(_.toMillis).flatMap(now =>
               // Check if cache is still valid
               if now - cached.cachedAt < cacheConfig.ttl.toMillis then
-                logger.debug(s"Cache hit for key: $key") *> Async[F].pure(
-                  Some(RateLimitDecision.Allowed(cached.tokens, cached.resetAt)),
-                )
+                logger.debug(s"Cache hit for key: $key") *> Async[F].pure(Some(
+                  RateLimitDecision.Allowed(cached.tokens, cached.resetAt),
+                ))
               else
                 // Cache expired, fetch fresh
                 fetchAndCache(key, profile),
