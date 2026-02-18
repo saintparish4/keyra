@@ -5,6 +5,7 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
+  workflow_dispatch:  # Run manually from Actions tab without a new push
 
 jobs:
   test:
@@ -39,7 +40,7 @@ jobs:
         
     - name: Compile
       run: sbt compile
-      
+
     - name: Run unit tests
       run: sbt test
       

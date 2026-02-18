@@ -52,6 +52,8 @@ lazy val root = project.in(file(".")).settings(
   version := "0.1.0-SNAPSHOT",
   scalaVersion := scala3Version,
   libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test,
+  scalacOptions += "-Xkind-projector",
+  semanticdbEnabled := true,
 )
 
 // Run unit tests only (excludes integration tests that require Docker/LocalStack).
