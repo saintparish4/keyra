@@ -113,12 +113,12 @@ class LeakyBucketRateLimitStore[F[_]: Async](
       }
     yield result
 
-  override def healthCheck: F[Boolean] = Async[F]
+  override def healthCheck: F[Either[String, Unit]] = Async[F]
     .fromCompletableFuture(Async[F].delay(
       client
         .describeTable(DescribeTableRequest.builder().tableName(tableName).build())
         .toCompletableFuture,
-    )).map(_ => true).handleError(_ => false)
+    )).map(_ => Right(())).handleError(e => Left(e.getMessage))
 
   private def getOrInitState(
       key: String,
@@ -129,8 +129,7 @@ class LeakyBucketRateLimitStore[F[_]: Async](
 
   private def getState(key: String): F[Option[LeakyBucketState]] =
     val request = GetItemRequest.builder().tableName(tableName)
-      .key(Map("pk" -> attr(s"ratelimit#$key")).asJava)
-      .consistentRead(true)
+      .key(Map("pk" -> attr(s"ratelimit#$key")).asJava).consistentRead(true)
       .build()
     Async[F].fromCompletableFuture(
       Async[F].delay(client.getItem(request).toCompletableFuture),
@@ -156,22 +155,23 @@ class LeakyBucketRateLimitStore[F[_]: Async](
     val ttl = System.currentTimeMillis() / 1000 + ttlSeconds
 
     val item = Map(
-      "pk"           -> attr(s"ratelimit#$key"),
-      "tokens"       -> attrND(newState.level),
+      "pk" -> attr(s"ratelimit#$key"),
+      "tokens" -> attrND(newState.level),
       "lastRefillMs" -> attrN(newState.lastLeakMs),
-      "version"      -> attrN(newState.version),
-      "ttl"          -> attrN(ttl),
+      "version" -> attrN(newState.version),
+      "ttl" -> attrN(ttl),
     )
 
-    val requestBuilder = PutItemRequest.builder().tableName(tableName).item(item.asJava)
+    val requestBuilder = PutItemRequest.builder().tableName(tableName)
+      .item(item.asJava)
     val request =
       if expectedVersion == 0L then
         requestBuilder.conditionExpression("attribute_not_exists(pk)").build()
       else
-        requestBuilder
-          .conditionExpression("version = :expectedVersion")
-          .expressionAttributeValues(Map(":expectedVersion" -> attrN(expectedVersion)).asJava)
-          .build()
+        requestBuilder.conditionExpression("version = :expectedVersion")
+          .expressionAttributeValues(
+            Map(":expectedVersion" -> attrN(expectedVersion)).asJava,
+          ).build()
 
     conditionalPut(client, request)
 

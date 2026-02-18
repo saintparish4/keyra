@@ -53,7 +53,7 @@ class IdempotencyApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
           override def storeResponse(idempotencyKey: String, response: StoredResponse): IO[Boolean] = IO.pure(false)
           override def markFailed(idempotencyKey: String): IO[Boolean] = IO.pure(false)
           override def get(idempotencyKey: String): IO[Option[IdempotencyRecord]] = IO.pure(None)
-          override def healthCheck: IO[Boolean] = IO.pure(true)
+          override def healthCheck: IO[Either[String, Unit]] = IO.pure(Right(()))
 
         logger <- Ref[IO].of(List.empty[String]).map(ref => capturingLogger(ref))
         api = IdempotencyApi[IO](
@@ -100,7 +100,7 @@ class IdempotencyApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
           override def storeResponse(idempotencyKey: String, response: StoredResponse): IO[Boolean] = IO.pure(false)
           override def markFailed(idempotencyKey: String): IO[Boolean] = IO.pure(false)
           override def get(idempotencyKey: String): IO[Option[IdempotencyRecord]] = IO.pure(None)
-          override def healthCheck: IO[Boolean] = IO.pure(true)
+          override def healthCheck: IO[Either[String, Unit]] = IO.pure(Right(()))
 
         api = IdempotencyApi[IO](
           store,

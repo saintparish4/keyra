@@ -51,7 +51,9 @@ class HttpApiIntegrationSpec
   lazy val rateLimitStore: DynamoDBRateLimitStore[IO] =
     new DynamoDBRateLimitStore[IO](
       dynamoDbClient,
-      testDynamoDBConfig.rateLimitTable
+      testDynamoDBConfig.rateLimitTable,
+      logger,
+      MetricsPublisher.noop[IO],
     )
 
   lazy val idempotencyStore: DynamoDBIdempotencyStore[IO] =

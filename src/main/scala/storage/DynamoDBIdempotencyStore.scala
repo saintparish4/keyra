@@ -14,8 +14,8 @@ import io.circe.generic.auto.*
 import io.circe.parser.*
 import io.circe.syntax.*
 import core.{
-  IdempotencyRecord, IdempotencyResult, IdempotencyStatus, IdempotencyStore,
-  StoredResponse,
+  CorruptIdempotencyRecordException, IdempotencyRecord, IdempotencyResult,
+  IdempotencyStatus, IdempotencyStore, StoreError, StoredResponse,
 }
 import DynamoDBOps.*
 
@@ -86,18 +86,18 @@ class DynamoDBIdempotencyStore[F[_]: Async](
           "SET #status = :status, #response = :response, #updatedAt = :updatedAt, #version = #version + :one",
         ).conditionExpression("#status = :pending").expressionAttributeNames(
           Map(
-            "#status"    -> "status",
-            "#response"  -> "response",
+            "#status" -> "status",
+            "#response" -> "response",
             "#updatedAt" -> "updatedAt",
-            "#version"   -> "version",
+            "#version" -> "version",
           ).asJava,
         ).expressionAttributeValues(
           Map(
-            ":status"    -> attr("Completed"),
-            ":response"  -> attr(response.asJson.noSpaces),
+            ":status" -> attr("Completed"),
+            ":response" -> attr(response.asJson.noSpaces),
             ":updatedAt" -> attrN(now.toEpochMilli),
-            ":pending"   -> attr("Pending"),
-            ":one"       -> attrN(1),
+            ":pending" -> attr("Pending"),
+            ":one" -> attrN(1),
           ).asJava,
         ).build()
 
@@ -115,7 +115,7 @@ class DynamoDBIdempotencyStore[F[_]: Async](
           Map("#status" -> "status", "#updatedAt" -> "updatedAt").asJava,
         ).expressionAttributeValues(
           Map(
-            ":status"    -> attr("Failed"),
+            ":status" -> attr("Failed"),
             ":updatedAt" -> attrN(now.toEpochMilli),
           ).asJava,
         ).build()
@@ -126,23 +126,25 @@ class DynamoDBIdempotencyStore[F[_]: Async](
   override def get(idempotencyKey: String): F[Option[IdempotencyRecord]] =
     val request = GetItemRequest.builder().tableName(tableName)
       .key(Map("pk" -> attr(s"idempotency#$idempotencyKey")).asJava)
-      .consistentRead(true)
-      .build()
+      .consistentRead(true).build()
 
     Async[F].fromCompletableFuture(
       Async[F].delay(client.getItem(request).toCompletableFuture),
-    ).map(response =>
+    ).flatMap(response =>
       if response.hasItem && !response.item().isEmpty then
-        Some(parseRecord(idempotencyKey, response.item().asScala.toMap))
-      else None,
+        parseRecord(idempotencyKey, response.item().asScala.toMap) match
+          case Right(record) => Async[F].pure(Some(record))
+          case Left(StoreError.CorruptRecord(key, detail)) => Async[F]
+              .raiseError(new CorruptIdempotencyRecordException(key, detail))
+      else Async[F].pure(None),
     )
 
-  override def healthCheck: F[Boolean] = Async[F]
+  override def healthCheck: F[Either[String, Unit]] = Async[F]
     .fromCompletableFuture(Async[F].delay(
       client
         .describeTable(DescribeTableRequest.builder().tableName(tableName).build())
         .toCompletableFuture,
-    )).map(_ => true).handleError(_ => false)
+    )).map(_ => Right(())).handleError(e => Left(e.getMessage))
 
   private def tryCreatePending(
       idempotencyKey: String,
@@ -153,43 +155,58 @@ class DynamoDBIdempotencyStore[F[_]: Async](
     val ttl = now.getEpochSecond + ttlSeconds
 
     val item = Map(
-      "pk"        -> attr(s"idempotency#$idempotencyKey"),
-      "clientId"  -> attr(clientId),
-      "status"    -> attr("Pending"),
+      "pk" -> attr(s"idempotency#$idempotencyKey"),
+      "clientId" -> attr(clientId),
+      "status" -> attr("Pending"),
       "createdAt" -> attrN(now.toEpochMilli),
       "updatedAt" -> attrN(now.toEpochMilli),
-      "version"   -> attrN(1),
-      "ttl"       -> attrN(ttl),
+      "version" -> attrN(1),
+      "ttl" -> attrN(ttl),
     )
 
     val request = PutItemRequest.builder().tableName(tableName).item(item.asJava)
       .conditionExpression("attribute_not_exists(pk) OR #status = :failed")
       .expressionAttributeNames(Map("#status" -> "status").asJava)
-      .expressionAttributeValues(Map(":failed" -> attr("Failed")).asJava)
-      .build()
+      .expressionAttributeValues(Map(":failed" -> attr("Failed")).asJava).build()
 
     conditionalPut(client, request)
 
   private def parseRecord(
       idempotencyKey: String,
       item: Map[String, AttributeValue],
-  ): IdempotencyRecord =
-    val status = item.get("status").map(_.s()) match
-      case Some("Pending") => IdempotencyStatus.Pending
-      case Some("Completed") => IdempotencyStatus.Completed
-      case Some("Failed") => IdempotencyStatus.Failed
-      case _ => IdempotencyStatus.Pending
+  ): Either[StoreError, IdempotencyRecord] =
+    val statusResult: Either[StoreError, IdempotencyStatus] =
+      item.get("status").map(_.s()) match
+        case Some("Pending") => Right(IdempotencyStatus.Pending)
+        case Some("Completed") => Right(IdempotencyStatus.Completed)
+        case Some("Failed") => Right(IdempotencyStatus.Failed)
+        case Some(unknown) => Left(
+            StoreError
+              .CorruptRecord(idempotencyKey, s"unknown status value: '$unknown'"),
+          )
+        case None => Left(
+            StoreError
+              .CorruptRecord(idempotencyKey, "missing 'status' attribute"),
+          )
 
-    val response = item.get("response")
-      .flatMap(av => decode[StoredResponse](av.s()).toOption)
+    val responseResult: Either[StoreError, Option[StoredResponse]] =
+      item.get("response") match
+        case None => Right(None)
+        case Some(av) => decode[StoredResponse](av.s()) match
+            case Right(r) => Right(Some(r))
+            case Left(err) => Left(StoreError.CorruptRecord(
+                idempotencyKey,
+                s"response JSON decode failed: $err",
+              ))
 
-    val createdAt = item.get("createdAt")
-      .map(a => Instant.ofEpochMilli(a.n().toLong)).getOrElse(Instant.now())
-
-    val updatedAt = item.get("updatedAt")
-      .map(a => Instant.ofEpochMilli(a.n().toLong)).getOrElse(createdAt)
-
-    IdempotencyRecord(
+    for
+      status <- statusResult
+      response <- responseResult
+      createdAt = item.get("createdAt")
+        .map(a => Instant.ofEpochMilli(a.n().toLong)).getOrElse(Instant.now())
+      updatedAt = item.get("updatedAt")
+        .map(a => Instant.ofEpochMilli(a.n().toLong)).getOrElse(createdAt)
+    yield IdempotencyRecord(
       idempotencyKey = idempotencyKey,
       clientId = item.get("clientId").map(_.s()).getOrElse("unknown"),
       status = status,

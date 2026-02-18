@@ -20,4 +20,4 @@ final class BroadcastingEventPublisher[F[_]: Async](
     .publishBatch(events) >>
     events.traverse_(e => dashboardQueue.tryOffer(e).void)
 
-  override def healthCheck: F[Boolean] = underlying.healthCheck
+  override def healthCheck: F[Either[String, Unit]] = underlying.healthCheck

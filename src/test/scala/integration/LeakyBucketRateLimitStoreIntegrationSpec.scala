@@ -127,7 +127,7 @@ class LeakyBucketRateLimitStoreIntegrationSpec
         .asserting(status => status shouldBe None)
 
     "should pass health check" in
-      store.healthCheck.asserting(healthy => healthy shouldBe true)
+      store.healthCheck.asserting(healthy => healthy shouldBe Right(()))
 
     "should handle high cost requests" in {
       val highCostProfile = testProfile.copy(capacity = 100)

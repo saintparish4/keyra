@@ -8,6 +8,7 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import core.{RateLimitDecision, RateLimitProfile}
 import storage.DynamoDBRateLimitStore
+import _root_.metrics.MetricsPublisher
 import cats.effect.IO
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*
@@ -36,7 +37,9 @@ class DynamoDBRateLimitStoreIntegrationSpec
   // Create store instance
   lazy val store: DynamoDBRateLimitStore[IO] = new DynamoDBRateLimitStore[IO](
     dynamoDbClient,
-    testDynamoDBConfig.rateLimitTable
+    testDynamoDBConfig.rateLimitTable,
+    logger,
+    MetricsPublisher.noop[IO],
   )
 
   override protected def beforeEach(): Unit = {
@@ -170,7 +173,7 @@ class DynamoDBRateLimitStoreIntegrationSpec
         .asserting(status => status shouldBe None)
 
     "should pass health check" in
-      store.healthCheck.asserting(healthy => healthy shouldBe true)
+      store.healthCheck.asserting(healthy => healthy shouldBe Right(()))
 
     "should handle high cost requests" in {
       val highCostProfile = testProfile.copy(capacity = 100)

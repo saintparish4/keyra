@@ -12,8 +12,14 @@ trait EventPublisher[F[_]]:
   // Publish a batch of events for efficiency
   def publishBatch(events: List[RateLimitEvent]): F[Unit]
 
-  // Health check for the event publisher
-  def healthCheck: F[Boolean]
+  /** Health check for the event publisher.
+    *
+    * @return
+    *   `Right(())` if healthy; `Left(reason)` with a human-readable description
+    *   of the failure. Never raises an exception — failures are encoded in the
+    *   return type.
+    */
+  def healthCheck: F[Either[String, Unit]]
 
 object EventPublisher:
   // No-op publisher for when events are disabled
@@ -21,4 +27,4 @@ object EventPublisher:
     new EventPublisher[F]:
       def publish(event: RateLimitEvent): F[Unit] = F.unit
       def publishBatch(events: List[RateLimitEvent]): F[Unit] = F.unit
-      def healthCheck: F[Boolean] = F.pure(true)
+      def healthCheck: F[Either[String, Unit]] = F.pure(Right(()))

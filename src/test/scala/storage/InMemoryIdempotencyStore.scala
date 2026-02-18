@@ -95,7 +95,7 @@ class InMemoryIdempotencyStore[F[_]: Temporal](
   override def get(idempotencyKey: String): F[Option[IdempotencyRecord]] =
     stateRef.get.map(_.get(idempotencyKey))
 
-  override def healthCheck: F[Boolean] = Temporal[F].pure(true)
+  override def healthCheck: F[Either[String, Unit]] = Temporal[F].pure(Right(()))
 
 object InMemoryIdempotencyStore:
   def create[F[_]: Temporal]: F[InMemoryIdempotencyStore[F]] = Ref

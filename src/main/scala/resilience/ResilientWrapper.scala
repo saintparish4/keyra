@@ -115,13 +115,13 @@ object ResilientRateLimitStore:
                     .getMessage}") *> Temporal[F].pure(None),
           )
 
-      override def healthCheck: F[Boolean] = healthTracker.isHealthy
-        .flatMap(healthy =>
+      override def healthCheck: F[Either[String, Unit]] = healthTracker
+        .isHealthy.flatMap(healthy =>
           if healthy then
             Temporal[F]
               .timeout(underlying.healthCheck, config.timeout.healthCheck)
-              .handleError(_ => false)
-          else Temporal[F].pure(false),
+              .handleError(e => Left(e.getMessage))
+          else Temporal[F].pure(Left("circuit breaker open")),
         )
 
       private def applyPatterns[A](operation: F[A], name: String): F[A] =

@@ -49,7 +49,7 @@ class InMemoryRateLimitStore[F[_]: Sync](
       RateLimitDecision.Allowed(refilled.tokensInt, resetAt)
     }
 
-  override def healthCheck: F[Boolean] = Sync[F].pure(true)
+  override def healthCheck: F[Either[String, Unit]] = Sync[F].pure(Right(()))
 
 object InMemoryRateLimitStore:
   def create[F[_]: Sync]: F[InMemoryRateLimitStore[F]] =

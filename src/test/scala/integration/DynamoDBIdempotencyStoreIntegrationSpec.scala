@@ -127,7 +127,7 @@ class DynamoDBIdempotencyStoreIntegrationSpec
     }
 
     "should pass health check" in
-      store.healthCheck.asserting(healthy => healthy shouldBe true)
+      store.healthCheck.asserting(healthy => healthy shouldBe Right(()))
 
     "should handle complex response bodies" in {
       val now = Instant.now()

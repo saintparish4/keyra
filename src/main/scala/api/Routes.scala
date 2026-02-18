@@ -66,21 +66,34 @@ class Routes[F[_]: Async](
     // Readiness probe - checks dependencies
     case GET -> Root / "ready" =>
       for
-        dynamoOk <- rateLimitStore.healthCheck.handleError(_ => false)
-        kinesisOk <- eventPublisher.healthCheck.handleError(_ => false)
-        idempotencyOk <- idempotencyStore.healthCheck.handleError(_ => false)
+        dynamoRlResult <- rateLimitStore.healthCheck
+          .handleError(e => Left(e.getMessage))
+        kinesisResult <- eventPublisher.healthCheck
+          .handleError(e => Left(e.getMessage))
+        dynamoIdResult <- idempotencyStore.healthCheck
+          .handleError(e => Left(e.getMessage))
+
+        failures = List(
+          dynamoRlResult.left.toOption.map(r => s"DynamoDB (rate-limit): $r"),
+          kinesisResult.left.toOption.map(r => s"Kinesis: $r"),
+          dynamoIdResult.left.toOption.map(r => s"DynamoDB (idempotency): $r"),
+        ).flatten
+
+        _ <- failures
+          .traverse_(reason => logger.warn(s"Readiness check failed: $reason"))
 
         checks = Map(
-          "dynamodb_ratelimit" -> dynamoOk,
-          "dynamodb_idempotency" -> idempotencyOk,
-          "kinesis" -> kinesisOk,
+          "dynamodb_ratelimit" -> dynamoRlResult.isRight,
+          "dynamodb_idempotency" -> dynamoIdResult.isRight,
+          "kinesis" -> kinesisResult.isRight,
         )
 
-        allHealthy = checks.values.forall(identity)
-
         response <-
-          if allHealthy then Ok(ReadyResponse("ready", checks).asJson)
-          else ServiceUnavailable(ReadyResponse("not ready", checks).asJson)
+          if failures.isEmpty then Ok(ReadyResponse("ready", checks).asJson)
+          else
+            ServiceUnavailable(
+              ReadyResponse("not ready", checks, Some(failures)).asJson,
+            )
       yield response
   }
 
@@ -112,7 +125,11 @@ class Routes[F[_]: Async](
 
 // API models
 case class HealthResponse(status: String, version: String)
-case class ReadyResponse(status: String, checks: Map[String, Boolean])
+case class ReadyResponse(
+    status: String,
+    checks: Map[String, Boolean],
+    failing: Option[List[String]] = None,
+)
 
 object BuildInfo:
   val version = "0.2.0"

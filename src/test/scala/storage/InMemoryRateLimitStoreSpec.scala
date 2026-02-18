@@ -143,6 +143,6 @@ class InMemoryRateLimitStoreSpec
           healthy <- store.healthCheck
         yield healthy
 
-      test.asserting(healthy => healthy.shouldBe(true))
+      test.asserting(healthy => healthy.shouldBe(Right(())))
     }
   }

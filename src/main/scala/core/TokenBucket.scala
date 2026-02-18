@@ -23,15 +23,11 @@ import java.time.Instant
   *   - cost must be ≤ capacity for [[consume]] to ever return Some.
   *
   * @see
-  *   [[storage.DynamoDBRateLimitStore]] for OCC write semantics built on top
-  *   of these functions.
+  *   [[storage.DynamoDBRateLimitStore]] for OCC write semantics built on top of
+  *   these functions.
   */
 
-case class TokenBucketState(
-    tokens: Double,
-    lastRefillMs: Long,
-    version: Long,
-):
+case class TokenBucketState(tokens: Double, lastRefillMs: Long, version: Long):
   def tokensInt: Int = tokens.toInt
 
 object TokenBucket:
@@ -46,7 +42,7 @@ object TokenBucket:
       nowMs: Long,
       profile: RateLimitProfile,
   ): TokenBucketState =
-    val elapsed  = (nowMs - state.lastRefillMs) / 1000.0
+    val elapsed = (nowMs - state.lastRefillMs) / 1000.0
     val refilled = math.min(
       profile.capacity.toDouble,
       state.tokens + elapsed * profile.refillRatePerSecond,
@@ -70,7 +66,7 @@ object TokenBucket:
 
   /** Instant at which the bucket will be fully replenished. */
   def resetAt(nowMs: Long, tokens: Double, profile: RateLimitProfile): Instant =
-    val tokensToFull  = profile.capacity - tokens
+    val tokensToFull = profile.capacity - tokens
     val secondsToFull = (tokensToFull / profile.refillRatePerSecond).ceil.toLong
     Instant.ofEpochMilli(nowMs + secondsToFull * 1000)
 
@@ -79,5 +75,4 @@ object TokenBucket:
       cost: Int,
       tokens: Double,
       profile: RateLimitProfile,
-  ): Int =
-    math.ceil((cost - tokens) / profile.refillRatePerSecond).toInt.max(1)
+  ): Int = math.ceil((cost - tokens) / profile.refillRatePerSecond).toInt.max(1)

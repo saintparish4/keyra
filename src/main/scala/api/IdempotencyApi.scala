@@ -37,7 +37,7 @@ class IdempotencyApi[F[_]: Async](
     * Check if an operation with this idempotency key has been processed before.
     */
   def check(request: Request[F], client: AuthenticatedClient): F[Response[F]] =
-    for
+    (for
       startTime <- Clock[F].realTime.map(_.toMillis)
       checkReq <- request.as[IdempotencyCheckRequest]
 
@@ -66,7 +66,16 @@ class IdempotencyApi[F[_]: Async](
 
       // Build response
       response <- buildCheckResponse(result)
-    yield response
+    yield response).handleErrorWith {
+      case e: CorruptIdempotencyRecordException => logger
+          .error(e)(s"Corrupt idempotency record for key=${e.key}") *>
+          ServiceUnavailable(io.circe.Json.obj(
+            "error" -> io.circe.Json.fromString("storage_corruption"),
+            "message" ->
+              io.circe.Json
+                .fromString(s"Idempotency record corrupted: ${e.detail}"),
+          ))
+    }
 
   /** POST /v1/idempotency/:key/complete
     *

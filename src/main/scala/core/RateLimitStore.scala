@@ -118,9 +118,11 @@ trait RateLimitStore[F[_]]:
   /** Health check for the storage backend.
     *
     * @return
-    *   true if the store is healthy and operational
+    *   `Right(())` if healthy; `Left(reason)` with a human-readable description
+    *   of the failure. Never raises an exception — failures are encoded in the
+    *   return type.
     */
-  def healthCheck: F[Boolean]
+  def healthCheck: F[Either[String, Unit]]
 
 /** Companion object with utility methods.
   */
@@ -141,20 +143,25 @@ object RateLimitStore:
           for
             now <- cats.effect.Clock[F].realTime.map(_.toMillis)
             decision <- stateRef.modify { buckets =>
-              val current = buckets
-                .getOrElse(key, TokenBucketState(profile.capacity.toDouble, now, 0L))
+              val current = buckets.getOrElse(
+                key,
+                TokenBucketState(profile.capacity.toDouble, now, 0L),
+              )
               val refilled = TokenBucket.refill(current, now, profile)
 
               TokenBucket.consume(refilled, cost, now) match
                 case Some(newState) =>
-                  val resetAt = TokenBucket.resetAt(now, newState.tokens, profile)
+                  val resetAt = TokenBucket
+                    .resetAt(now, newState.tokens, profile)
                   (
                     buckets + (key -> newState),
                     RateLimitDecision.Allowed(newState.tokensInt, resetAt),
                   )
                 case None =>
-                  val retryAfter = TokenBucket.retryAfterSeconds(cost, refilled.tokens, profile)
-                  val resetAt    = TokenBucket.resetAt(now, refilled.tokens, profile)
+                  val retryAfter = TokenBucket
+                    .retryAfterSeconds(cost, refilled.tokens, profile)
+                  val resetAt = TokenBucket
+                    .resetAt(now, refilled.tokens, profile)
                   (buckets, RateLimitDecision.Rejected(retryAfter, resetAt))
             }
           yield decision
@@ -165,14 +172,15 @@ object RateLimitStore:
         ): F[Option[RateLimitDecision.Allowed]] =
           for
             now <- cats.effect.Clock[F].realTime.map(_.toMillis)
-            status <- stateRef.get.map { buckets =>
+            status <- stateRef.get.map(buckets =>
               buckets.get(key).map { current =>
                 val refilled = TokenBucket.refill(current, now, profile)
-                val resetAt  = TokenBucket.resetAt(now, refilled.tokens, profile)
+                val resetAt = TokenBucket.resetAt(now, refilled.tokens, profile)
                 RateLimitDecision.Allowed(refilled.tokensInt, resetAt)
-              }
-            }
+              },
+            )
           yield status
 
-        override def healthCheck: F[Boolean] = Temporal[F].pure(true)
+        override def healthCheck: F[Either[String, Unit]] = Temporal[F]
+          .pure(Right(()))
     }

@@ -38,23 +38,30 @@ object Main extends IOApp:
       _ <- Resource.eval(logger.info(s"Configuration loaded: ${config.server
           .host}:${config.server.port}"))
 
-      // Initialize metrics publisher
+      // Initialize metrics publisher — pass full config so flush-threshold and
+      // max-buffer-size are wired from application.conf
       metricsPublisher <- config.metrics.enabled match
-        case true => MetricsPublisher
-            .cloudWatch[IO](config.aws.region, config.metrics.namespace)
+        case true =>
+          val metricsConfig = _root_.metrics.MetricsConfig(
+            namespace = config.metrics.namespace,
+            maxBufferSize = config.metrics.maxBufferSize,
+            flushThreshold = config.metrics.flushThreshold,
+          )
+          MetricsPublisher.cloudWatch[IO](config.aws.region, metricsConfig)
         case false => Resource
             .pure[IO, MetricsPublisher[IO]](MetricsPublisher.noop[IO])
       _ <- Resource.eval(logger.info("Metrics publisher initialized"))
 
-      // Initialize event publisher (underlying: Kinesis or noop)
+      // Initialize event publisher — Kinesis uses a bounded queue + drain fiber
+      // managed by KinesisPublisher.resource so the fiber is properly cancelled on shutdown
       underlyingEventPublisher <- config.kinesis.enabled match
         case true =>
           for
             kinesisClient <- AwsClients
               .kinesisClient[IO](config.aws, config.dynamodb)
-            kinesisPublisher =
-              new KinesisPublisher[IO](kinesisClient, config.kinesis)
-          yield kinesisPublisher: EventPublisher[IO]
+            publisher <- KinesisPublisher
+              .resource[IO](kinesisClient, config.kinesis, metricsPublisher)
+          yield publisher
         case false => Resource
             .pure[IO, EventPublisher[IO]](EventPublisher.noop[IO])
       _ <- Resource.eval(logger.info("Event publisher initialized"))
@@ -84,6 +91,8 @@ object Main extends IOApp:
               store = new DynamoDBRateLimitStore[IO](
                 dynamoClient,
                 config.dynamodb.rateLimitTable,
+                logger,
+                metricsPublisher,
               )
             yield store
       _ <- Resource.eval(logger.info(s"Rate limit store initialized: ${config

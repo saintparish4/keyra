@@ -16,34 +16,29 @@ import software.amazon.awssdk.services.dynamodb.model.*
   */
 object DynamoDBOps:
 
-  def attr(s: String): AttributeValue =
-    AttributeValue.builder().s(s).build()
+  def attr(s: String): AttributeValue = AttributeValue.builder().s(s).build()
 
-  def attrN(n: Long): AttributeValue =
-    AttributeValue.builder().n(n.toString).build()
+  def attrN(n: Long): AttributeValue = AttributeValue.builder().n(n.toString)
+    .build()
 
-  def attrND(d: Double): AttributeValue =
-    AttributeValue.builder().n(d.toString).build()
+  def attrND(d: Double): AttributeValue = AttributeValue.builder().n(d.toString)
+    .build()
 
-  def attrBool(b: Boolean): AttributeValue =
-    AttributeValue.builder().bool(b).build()
+  def attrBool(b: Boolean): AttributeValue = AttributeValue.builder().bool(b)
+    .build()
 
   /** Execute a conditional PutItem; returns false on condition failure. */
   def conditionalPut[F[_]: Async](
       client: DynamoDbAsyncClient,
       request: PutItemRequest,
-  ): F[Boolean] =
-    Async[F]
-      .fromCompletableFuture(Async[F].delay(client.putItem(request).toCompletableFuture))
-      .map(_ => true)
-      .recover { case _: ConditionalCheckFailedException => false }
+  ): F[Boolean] = Async[F].fromCompletableFuture(
+    Async[F].delay(client.putItem(request).toCompletableFuture),
+  ).map(_ => true).recover { case _: ConditionalCheckFailedException => false }
 
   /** Execute a conditional UpdateItem; returns false on condition failure. */
   def conditionalUpdate[F[_]: Async](
       client: DynamoDbAsyncClient,
       request: UpdateItemRequest,
-  ): F[Boolean] =
-    Async[F]
-      .fromCompletableFuture(Async[F].delay(client.updateItem(request).toCompletableFuture))
-      .map(_ => true)
-      .recover { case _: ConditionalCheckFailedException => false }
+  ): F[Boolean] = Async[F].fromCompletableFuture(
+    Async[F].delay(client.updateItem(request).toCompletableFuture),
+  ).map(_ => true).recover { case _: ConditionalCheckFailedException => false }

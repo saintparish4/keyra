@@ -40,29 +40,41 @@ class RateLimitApi[F[_]: Async](
       startTime <- Clock[F].realTime.map(_.toMillis)
       checkReq <- request.as[RateLimitCheckRequest]
 
-      // Get profile for this client tier
-      profile <- Async[F].pure(getProfile(client.tier, checkReq.profile))
+      // Validate cost before hitting the store; zero/negative cost is a client error
+      response <-
+        if checkReq.cost <= 0 then
+          BadRequest(io.circe.Json.obj(
+            "error" -> io.circe.Json.fromString("validation_error"),
+            "message" -> io.circe.Json.fromString("cost must be positive"),
+          ))
+        else
+          for
+            // Get profile for this client tier
+            profile <- Async[F].pure(getProfile(client.tier, checkReq.profile))
 
-      // Perform rate limit check
-      _ <- logger.debug(s"Rate limit check: key=${checkReq.key}, cost=${checkReq
-          .cost}, tier=${client.tier}")
-      decision <- store.checkAndConsume(checkReq.key, checkReq.cost, profile)
+            // Perform rate limit check
+            _ <- logger.debug(s"Rate limit check: key=${checkReq
+                .key}, cost=${checkReq.cost}, tier=${client.tier}")
+            decision <- store
+              .checkAndConsume(checkReq.key, checkReq.cost, profile)
 
-      // Record metrics
-      latency <- Clock[F].realTime.map(_.toMillis - startTime)
-      _ <- metricsPublisher.recordLatency("rate_limit_check", latency.toDouble)
-      _ <- decision match
-        case RateLimitDecision.Allowed(_, _) => metricsPublisher
-            .recordRateLimitDecision(allowed = true, client.apiKeyId)
-        case RateLimitDecision.Rejected(_, _) => metricsPublisher
-            .recordRateLimitDecision(allowed = false, client.apiKeyId)
+            // Record metrics
+            latency <- Clock[F].realTime.map(_.toMillis - startTime)
+            _ <- metricsPublisher
+              .recordLatency("rate_limit_check", latency.toDouble)
+            _ <- decision match
+              case RateLimitDecision.Allowed(_, _) => metricsPublisher
+                  .recordRateLimitDecision(allowed = true, client.apiKeyId)
+              case RateLimitDecision.Rejected(_, _) => metricsPublisher
+                  .recordRateLimitDecision(allowed = false, client.apiKeyId)
 
-      // Publish event (fire and forget)
-      now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
-      _ <- publishEvent(decision, checkReq, client, now).start
+            // Publish event (fire and forget)
+            now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
+            _ <- publishEvent(decision, checkReq, client, now).start
 
-      // Build response
-      response <- buildCheckResponse(decision, profile)
+            // Build response
+            resp <- buildCheckResponse(decision, profile)
+          yield resp
     yield response
 
   /** GET /v1/ratelimit/status/:key

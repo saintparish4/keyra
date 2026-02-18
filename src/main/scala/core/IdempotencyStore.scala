@@ -122,8 +122,13 @@ trait IdempotencyStore[F[_]]:
   def get(idempotencyKey: String): F[Option[IdempotencyRecord]]
 
   /** Health check for the storage backend.
+    *
+    * @return
+    *   `Right(())` if healthy; `Left(reason)` with a human-readable description
+    *   of the failure. Never raises an exception — failures are encoded in the
+    *   return type.
     */
-  def healthCheck: F[Boolean]
+  def healthCheck: F[Either[String, Unit]]
 
 object IdempotencyStore:
   /** Create an in-memory store for testing.
@@ -228,5 +233,6 @@ object IdempotencyStore:
         override def get(idempotencyKey: String): F[Option[IdempotencyRecord]] =
           stateRef.get.map(_.get(idempotencyKey))
 
-        override def healthCheck: F[Boolean] = Temporal[F].pure(true)
+        override def healthCheck: F[Either[String, Unit]] = Temporal[F]
+          .pure(Right(()))
     }
