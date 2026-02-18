@@ -33,6 +33,7 @@ case class MetricsConfig(
     batchSize: Int = 20,
     enabled: Boolean = true,
     highResolution: Boolean = false, // 1-second resolution costs extra
+    maxBufferSize: Int = 50000,      // oldest entries dropped when buffer is full
 )
 
 object MetricsConfig:
@@ -113,14 +114,15 @@ object MetricsPublisher:
       client: CloudWatchAsyncClient,
       config: MetricsConfig,
   ): Resource[F, MetricsPublisher[F]] =
+    val logger = Logger[F]
     for
-      bufferRef <- Resource.eval(Ref.of[F, List[MetricDataPoint]](List.empty))
+      bufferRef    <- Resource.eval(Ref.of[F, List[MetricDataPoint]](List.empty))
       lastFlushRef <- Resource.eval(Ref.of[F, Long](System.currentTimeMillis()))
       _ <-
         if config.enabled then
-          // Background fiber for periodic flushing
+          // Background periodic flush fiber; on shutdown, cancel then flush remaining
           Resource.make(flushLoop(bufferRef, lastFlushRef, client, config).start)(
-            _.cancel,
+            fiber => fiber.cancel *> doFlush(bufferRef, lastFlushRef, client, config, logger),
           )
         else Resource.pure[F, Fiber[F, Throwable, Nothing]](null)
     yield new CloudWatchMetricsPublisher[F](
@@ -328,7 +330,13 @@ private class CloudWatchMetricsPublisher[F[_]: Async: Logger](
     .doFlush(bufferRef, lastFlushRef, client, config, logger)
 
   private def addMetric(metric: MetricDataPoint): F[Unit] =
-    if config.enabled then bufferRef.update(metric :: _) else Async[F].unit
+    if config.enabled then
+      bufferRef.update { buf =>
+        // Buffer is newest-first; tail is the oldest entry — drop it when full
+        val trimmed = if buf.size >= config.maxBufferSize then buf.dropRight(1) else buf
+        metric :: trimmed
+      }
+    else Async[F].unit
 
   private def stateToValue(state: String): Double = state.toLowerCase match
     case "closed" => 0.0

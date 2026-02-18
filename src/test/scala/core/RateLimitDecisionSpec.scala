@@ -45,7 +45,7 @@ class RateLimitDecisionSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers
 
   "TokenBucketState" - {
     "should truncate tokens to int correctly" in {
-      val state = TokenBucketState(tokens = 95.7, lastRefillEpochMs = 0L, version = 1L)
+      val state = TokenBucketState(tokens = 95.7, lastRefillMs = 0L, version = 1L)
       state.tokensInt shouldBe 95
     }
   }

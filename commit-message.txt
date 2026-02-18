@@ -1,0 +1,28 @@
+refactor(core,storage,metrics): 
+
+1.1 - Extract TokenBucket.scala pure module
+- New core.TokenBucketState case class (canonical, replaces duplicates in
+  RateLimitStore and DynamoDBRateLimitStore)
+- New core.TokenBucket object: refill, consume, resetAt, retryAfterSeconds
+- DynamoDBRateLimitStore, RateLimitStore.inMemory, and test
+  InMemoryRateLimitStore all delegate to TokenBucket; eliminates 3-way
+  duplication of refill/reset-at logic
+
+1.2 - Extract DynamoDBOps.scala shared helpers
+- New storage.DynamoDBOps object: attr, attrN, attrND, attrBool builders;
+  conditionalPut and conditionalUpdate wrappers (return false on
+  ConditionalCheckFailedException)
+- DynamoDBRateLimitStore, DynamoDBIdempotencyStore, and
+  LeakyBucketRateLimitStore all import DynamoDBOps.*; removes all inline
+  AttributeValue boilerplate and duplicated recover blocks
+
+1.3 - MetricsPublisher buffer cap + shutdown flush
+- metrics.MetricsConfig and config.MetricsConfig gain maxBufferSize = 50000
+- application.conf: metrics.max-buffer-size = 50000 with env override
+- CloudWatchMetricsPublisher.addMetric drops oldest entry (list tail) when
+  buffer is full
+- Resource finalizer changed to cancel *> doFlush so buffered metrics are
+  flushed before shutdown
+
+No behavioral changes.
+41 unit tests pass.

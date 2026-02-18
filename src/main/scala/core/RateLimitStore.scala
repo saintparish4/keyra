@@ -122,14 +122,6 @@ trait RateLimitStore[F[_]]:
     */
   def healthCheck: F[Boolean]
 
-// Internal state of a token bucket
-case class TokenBucketState(
-    tokens: Double,
-    lastRefillEpochMs: Long,
-    version: Long,
-):
-  def tokensInt: Int = tokens.toInt
-
 /** Companion object with utility methods.
   */
 object RateLimitStore:
@@ -139,9 +131,7 @@ object RateLimitStore:
     import cats.effect.Ref
     import cats.syntax.all.*
 
-    case class BucketState(tokens: Double, lastRefillMs: Long, version: Long)
-
-    Ref.of[F, Map[String, BucketState]](Map.empty).map { stateRef =>
+    Ref.of[F, Map[String, TokenBucketState]](Map.empty).map { stateRef =>
       new RateLimitStore[F]:
         override def checkAndConsume(
             key: String,
@@ -152,35 +142,20 @@ object RateLimitStore:
             now <- cats.effect.Clock[F].realTime.map(_.toMillis)
             decision <- stateRef.modify { buckets =>
               val current = buckets
-                .getOrElse(key, BucketState(profile.capacity.toDouble, now, 0L))
+                .getOrElse(key, TokenBucketState(profile.capacity.toDouble, now, 0L))
+              val refilled = TokenBucket.refill(current, now, profile)
 
-              // Token-bucket refill: elapsed_sec * refillRate, cap at capacity (see RateLimitStore doc)
-              val elapsed = (now - current.lastRefillMs) / 1000.0
-              val refilled = math.min(
-                profile.capacity.toDouble,
-                current.tokens + elapsed * profile.refillRatePerSecond,
-              )
-
-              if refilled >= cost then
-                val newState =
-                  BucketState(refilled - cost, now, current.version + 1)
-                val resetAt = Instant.ofEpochMilli(
-                  now +
-                    ((profile.capacity - newState.tokens) /
-                      profile.refillRatePerSecond * 1000).toLong,
-                )
-                (
-                  buckets + (key -> newState),
-                  RateLimitDecision.Allowed(newState.tokens.toInt, resetAt),
-                )
-              else
-                val retryAfter = math
-                  .ceil((cost - refilled) / profile.refillRatePerSecond).toInt
-                val resetAt = Instant.ofEpochMilli(
-                  now + (profile.capacity / profile.refillRatePerSecond * 1000)
-                    .toLong,
-                )
-                (buckets, RateLimitDecision.Rejected(retryAfter, resetAt))
+              TokenBucket.consume(refilled, cost, now) match
+                case Some(newState) =>
+                  val resetAt = TokenBucket.resetAt(now, newState.tokens, profile)
+                  (
+                    buckets + (key -> newState),
+                    RateLimitDecision.Allowed(newState.tokensInt, resetAt),
+                  )
+                case None =>
+                  val retryAfter = TokenBucket.retryAfterSeconds(cost, refilled.tokens, profile)
+                  val resetAt    = TokenBucket.resetAt(now, refilled.tokens, profile)
+                  (buckets, RateLimitDecision.Rejected(retryAfter, resetAt))
             }
           yield decision
 
@@ -192,17 +167,9 @@ object RateLimitStore:
             now <- cats.effect.Clock[F].realTime.map(_.toMillis)
             status <- stateRef.get.map { buckets =>
               buckets.get(key).map { current =>
-                val elapsed = (now - current.lastRefillMs) / 1000.0
-                val refilled = math.min(
-                  profile.capacity.toDouble,
-                  current.tokens + elapsed * profile.refillRatePerSecond,
-                )
-                val resetAt = Instant.ofEpochMilli(
-                  now +
-                    ((profile.capacity - refilled) /
-                      profile.refillRatePerSecond * 1000).toLong,
-                )
-                RateLimitDecision.Allowed(refilled.toInt, resetAt)
+                val refilled = TokenBucket.refill(current, now, profile)
+                val resetAt  = TokenBucket.resetAt(now, refilled.tokens, profile)
+                RateLimitDecision.Allowed(refilled.tokensInt, resetAt)
               }
             }
           yield status

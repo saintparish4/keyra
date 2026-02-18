@@ -1,7 +1,5 @@
 package storage
 
-import java.time.Instant
-
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.jdk.FutureConverters.*
@@ -10,7 +8,8 @@ import cats.effect.*
 import cats.syntax.all.*
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.*
-import core.{RateLimitDecision, RateLimitProfile, RateLimitStore}
+import core.{RateLimitDecision, RateLimitProfile, RateLimitStore, TokenBucket, TokenBucketState}
+import DynamoDBOps.*
 
 /** DynamoDB implementation of RateLimitStore using token bucket algorithm.
   *
@@ -65,49 +64,36 @@ class DynamoDBRateLimitStore[F[_]: Async](
       retriesRemaining: Int,
   ): F[RateLimitDecision] =
     for
-      now <- Clock[F].realTime.map(_.toMillis)
-
-      // Get current state
+      now          <- Clock[F].realTime.map(_.toMillis)
       currentState <- getOrInitState(key, profile, now)
+      refilled      = TokenBucket.refill(currentState, now, profile)
 
-      // Token-bucket refill: elapsed_sec * refillRate, cap at capacity (see class doc)
-      elapsed = (now - currentState.lastRefillMs) / 1000.0
-      tokensToAdd = elapsed * profile.refillRatePerSecond
-      refilledTokens = math
-        .min(profile.capacity.toDouble, currentState.tokens + tokensToAdd)
-
-      // Decide and attempt update
       decision <-
-        if refilledTokens >= cost then
-          val newTokens = refilledTokens - cost
-          val newState =
-            TokenBucketState(newTokens, now, currentState.version + 1)
-
-          attemptUpdate(key, currentState.version, newState, profile.ttlSeconds)
-            .flatMap {
-              case true =>
-                val resetAt = calculateResetAt(now, newTokens, profile)
-                Async[F].pure(RateLimitDecision.Allowed(newTokens.toInt, resetAt))
-              case false =>
-                // OCC conflict: retry with 1ms delay, max MaxRetries total; then reject (see class doc)
-                if retriesRemaining > 0 then
-                  Async[F].sleep(1.millis) *> checkAndConsumeWithRetry(
-                    key,
-                    cost,
-                    profile,
-                    retriesRemaining - 1,
-                  )
-                else
-                  // High contention: reject after max retries to avoid over-issuing
-                  val resetAt = calculateResetAt(now, refilledTokens, profile)
-                  Async[F].pure(RateLimitDecision.Rejected(1, resetAt))
-            }
-        else
-          val retryAfter = math
-            .ceil((cost - refilledTokens) / profile.refillRatePerSecond).toInt
-            .max(1)
-          val resetAt = calculateResetAt(now, refilledTokens, profile)
-          Async[F].pure(RateLimitDecision.Rejected(retryAfter, resetAt))
+        TokenBucket.consume(refilled, cost, now) match
+          case Some(newState) =>
+            attemptUpdate(key, currentState.version, newState, profile.ttlSeconds)
+              .flatMap {
+                case true =>
+                  val resetAt = TokenBucket.resetAt(now, newState.tokens, profile)
+                  Async[F].pure(RateLimitDecision.Allowed(newState.tokensInt, resetAt))
+                case false =>
+                  // OCC conflict: retry with 1ms delay, max MaxRetries total; then reject (see class doc)
+                  if retriesRemaining > 0 then
+                    Async[F].sleep(1.millis) *> checkAndConsumeWithRetry(
+                      key,
+                      cost,
+                      profile,
+                      retriesRemaining - 1,
+                    )
+                  else
+                    // High contention: reject after max retries to avoid over-issuing
+                    val resetAt = TokenBucket.resetAt(now, refilled.tokens, profile)
+                    Async[F].pure(RateLimitDecision.Rejected(1, resetAt))
+              }
+          case None =>
+            val retryAfter = TokenBucket.retryAfterSeconds(cost, refilled.tokens, profile)
+            val resetAt    = TokenBucket.resetAt(now, refilled.tokens, profile)
+            Async[F].pure(RateLimitDecision.Rejected(retryAfter, resetAt))
     yield decision
 
   override def getStatus(
@@ -115,15 +101,12 @@ class DynamoDBRateLimitStore[F[_]: Async](
       profile: RateLimitProfile,
   ): F[Option[RateLimitDecision.Allowed]] =
     for
-      now <- Clock[F].realTime.map(_.toMillis)
+      now        <- Clock[F].realTime.map(_.toMillis)
       maybeState <- getState(key)
-      result = maybeState.map { state =>
-        val elapsed = (now - state.lastRefillMs) / 1000.0
-        val tokensToAdd = elapsed * profile.refillRatePerSecond
-        val refilledTokens = math
-          .min(profile.capacity.toDouble, state.tokens + tokensToAdd)
-        val resetAt = calculateResetAt(now, refilledTokens, profile)
-        RateLimitDecision.Allowed(refilledTokens.toInt, resetAt)
+      result      = maybeState.map { state =>
+        val refilled = TokenBucket.refill(state, now, profile)
+        val resetAt  = TokenBucket.resetAt(now, refilled.tokens, profile)
+        RateLimitDecision.Allowed(refilled.tokensInt, resetAt)
       }
     yield result
 
@@ -142,9 +125,9 @@ class DynamoDBRateLimitStore[F[_]: Async](
     .map(_.getOrElse(TokenBucketState(profile.capacity.toDouble, now, 0L)))
 
   private def getState(key: String): F[Option[TokenBucketState]] =
-    val request = GetItemRequest.builder().tableName(tableName).key(
-      Map("pk" -> AttributeValue.builder().s(s"ratelimit#$key").build()).asJava,
-    ).consistentRead(true).build()
+    val request = GetItemRequest.builder().tableName(tableName)
+      .key(Map("pk" -> attr(s"ratelimit#$key")).asJava)
+      .consistentRead(true).build()
 
     Async[F].fromCompletableFuture(
       Async[F].delay(client.getItem(request).toCompletableFuture),
@@ -170,16 +153,14 @@ class DynamoDBRateLimitStore[F[_]: Async](
     val ttl = System.currentTimeMillis() / 1000 + ttlSeconds
 
     val item = Map(
-      "pk" -> AttributeValue.builder().s(s"ratelimit#$key").build(),
-      "tokens" -> AttributeValue.builder().n(newState.tokens.toString).build(),
-      "lastRefillMs" -> AttributeValue.builder()
-        .n(newState.lastRefillMs.toString).build(),
-      "version" -> AttributeValue.builder().n(newState.version.toString).build(),
-      "ttl" -> AttributeValue.builder().n(ttl.toString).build(),
+      "pk"           -> attr(s"ratelimit#$key"),
+      "tokens"       -> attrND(newState.tokens),
+      "lastRefillMs" -> attrN(newState.lastRefillMs),
+      "version"     -> attrN(newState.version),
+      "ttl"         -> attrN(ttl),
     )
 
-    val requestBuilder = PutItemRequest.builder().tableName(tableName)
-      .item(item.asJava)
+    val requestBuilder = PutItemRequest.builder().tableName(tableName).item(item.asJava)
 
     // OCC: conditional write so only one writer wins. First write: attribute_not_exists(pk);
     // subsequent: version = :expectedVersion. Caller retries on ConditionalCheckFailedException
@@ -188,34 +169,12 @@ class DynamoDBRateLimitStore[F[_]: Async](
       if expectedVersion == 0L then
         requestBuilder.conditionExpression("attribute_not_exists(pk)").build()
       else
-        requestBuilder.conditionExpression("version = :expectedVersion")
-          .expressionAttributeValues(
-            Map(
-              ":expectedVersion" -> AttributeValue.builder()
-                .n(expectedVersion.toString).build(),
-            ).asJava,
-          ).build()
+        requestBuilder
+          .conditionExpression("version = :expectedVersion")
+          .expressionAttributeValues(Map(":expectedVersion" -> attrN(expectedVersion)).asJava)
+          .build()
 
-    Async[F].fromCompletableFuture(
-      Async[F].delay(client.putItem(request).toCompletableFuture),
-    ).map(_ => true).recover { case _: ConditionalCheckFailedException =>
-      false
-    }
-
-  private def calculateResetAt(
-      now: Long,
-      currentTokens: Double,
-      profile: RateLimitProfile,
-  ): Instant =
-    val tokensToFull = profile.capacity - currentTokens
-    val secondsToFull = (tokensToFull / profile.refillRatePerSecond).ceil.toLong
-    Instant.ofEpochMilli(now + secondsToFull * 1000)
-
-private case class TokenBucketState(
-    tokens: Double,
-    lastRefillMs: Long,
-    version: Long,
-)
+    conditionalPut(client, request)
 
 object DynamoDBRateLimitStore:
   def apply[F[_]: Async](
