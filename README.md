@@ -102,25 +102,179 @@ The platform offers distributed rate limiting that works seamlessly across multi
 - AWS CLI 2.x (optional, for future AWS deployment)
 - Terraform 1.5+ (optional, for AWS deployment)
 
-## Infrastructure
+## Infrastructure / Deploy
 
-Terraform provisions DynamoDB (rate limit + idempotency), Kinesis, ECS Fargate, and an ALB. All variables are in [terraform/variables.tf](terraform/variables.tf); dev overrides are in [terraform/environments/dev.tfvars](terraform/environments/dev.tfvars) (or [demo.tfvars](terraform/environments/demo.tfvars)). **Required:** `container_image` (no default)—e.g. your ECR image URI.
+Terraform provisions the following AWS resources ([`terraform/`](terraform/)):
 
-**Dev: plan and apply**
+| Resource | What it does |
+|---|---|
+| **DynamoDB** `rate-limits` | Token-bucket state per key (OCC on version field) |
+| **DynamoDB** `idempotency` | Idempotency key storage with TTL auto-expiry |
+| **Kinesis** `rate-limit-events` | Rate-limit decision event stream |
+| **ECS Fargate** | Containerised app; autoscaling 2–10 tasks |
+| **ALB** | Application Load Balancer fronting ECS |
+| **VPC / subnets** | Private subnets for ECS, public subnets for ALB |
+
+All variables are in [`terraform/variables.tf`](terraform/variables.tf). `container_image` is the only **required** variable (no default); all others have sensible defaults.
+
+**Key variables**
+
+| Variable | Default | Description |
+|---|---|---|
+| `container_image` | *(required)* | Docker image URI (e.g. ECR) |
+| `aws_region` | `us-east-1` | AWS region |
+| `environment` | `dev` | Environment tag applied to all resources |
+| `ecs_desired_count` | `2` | Number of running ECS tasks |
+| `ecs_cpu` / `ecs_memory` | `256` / `512` | Container vCPU units and memory (MB) |
+| `dynamodb_billing_mode` | `PAY_PER_REQUEST` | `PAY_PER_REQUEST` or `PROVISIONED` |
+| `kinesis_shard_count` | `1` | Number of Kinesis shards |
+| `enable_autoscaling` | `true` | ECS target-tracking autoscaling (min 2, max 10 tasks) |
+| `alarm_sns_topic_arn` | `""` | SNS topic for CloudWatch alarms (optional) |
+
+**Deploy to dev**
 
 ```bash
 cd terraform
 terraform init
-terraform plan -var-file=environments/dev.tfvars -var="container_image=ACCOUNT.dkr.ecr.REGION.amazonaws.com/rate-limiter:latest"
-terraform apply -var-file=environments/dev.tfvars -var="container_image=ACCOUNT.dkr.ecr.REGION.amazonaws.com/rate-limiter:latest"
+terraform plan \
+  -var-file=environments/dev.tfvars \
+  -var="container_image=ACCOUNT.dkr.ecr.REGION.amazonaws.com/rate-limiter:latest"
+terraform apply \
+  -var-file=environments/dev.tfvars \
+  -var="container_image=ACCOUNT.dkr.ecr.REGION.amazonaws.com/rate-limiter:latest"
 ```
 
-API endpoint after apply: `terraform output api_endpoint`.
+Example [`terraform/environments/dev.tfvars`](terraform/environments/dev.tfvars):
+
+```hcl
+environment             = "dev"
+ecs_desired_count       = 1
+ecs_cpu                 = 256
+ecs_memory              = 512
+kinesis_shard_count     = 1
+kinesis_retention_hours = 24
+# container_image = "123456789.dkr.ecr.us-east-1.amazonaws.com/rate-limiter:latest"
+```
+
+After apply, retrieve the ALB DNS name:
+
+```bash
+terraform output api_endpoint
+```
 
 ## Documentation
 
 - **[API Reference](docs/API.md)** - Complete API documentation with examples
 - **[Architecture Decisions](docs/ARCHITECTURE.md)** - Design rationale and trade-offs
+
+## Configuration
+
+All settings are in [`src/main/resources/application.conf`](src/main/resources/application.conf) and can be overridden via environment variables.
+
+### Per-tier rate limit profiles
+
+Profiles set the burst cap (capacity) and steady-state throughput (refill rate) per client tier. Named profiles override tier defaults when the `profile` field is supplied in a rate-limit check request.
+
+| Profile | Capacity (burst) | Refill rate | TTL |
+|---|---|---|---|
+| `free` | 20 tokens | 2 req/s | 1 h |
+| `basic` | 100 tokens | 10 req/s | 1 h |
+| `premium` | 1 000 tokens | 100 req/s | 1 h |
+| `enterprise` | 10 000 tokens | 1 000 req/s | 1 h |
+
+Profile lookup is O(1) — profiles are stored as `Map[String, RateLimitProfile]` built at startup. Invalid profiles (capacity < 1, refillRate ≤ 0, empty name) cause a startup failure.
+
+### Key environment variable overrides
+
+| Env var | Config key | Default |
+|---|---|---|
+| `RATE_LIMIT_ALGORITHM` | `rate-limit.algorithm` | `token-bucket` |
+| `RATELIMIT_DEFAULT_CAPACITY` | `rate-limit.default-capacity` | `100` |
+| `RATELIMIT_DEFAULT_REFILL_RATE` | `rate-limit.default-refill-rate-per-second` | `10.0` |
+| `IDEMPOTENCY_DEFAULT_TTL` | `idempotency.default-ttl-seconds` | `86400` (24 h) |
+| `IDEMPOTENCY_MAX_TTL_SECONDS` | `idempotency.max-ttl-seconds` | `86400` (24 h) |
+| `KINESIS_ENABLED` | `kinesis.enabled` | `true` |
+| `KINESIS_QUEUE_SIZE` | `kinesis.queue-size` | `10000` |
+| `METRICS_ENABLED` | `metrics.enabled` | `true` |
+| `METRICS_MAX_BUFFER_SIZE` | `metrics.max-buffer-size` | `50000` |
+| `METRICS_FLUSH_THRESHOLD` | `metrics.flush-threshold` | `1000` |
+| `AUTH_ENABLED` | `security.authentication.enabled` | `true` |
+| `CIRCUIT_BREAKER_ENABLED` | `resilience.circuit-breaker.enabled` | `true` |
+| `BULKHEAD_MAX_CONCURRENT` | `resilience.bulkhead.max-concurrent` | `100` |
+
+See [`application.conf`](src/main/resources/application.conf) for the complete reference.
+
+## Health and Readiness
+
+The service exposes two probe endpoints on the same HTTP port (`8080`):
+
+### `GET /health` — liveness
+
+Returns `200 OK` whenever the process is alive. No dependency checks are performed. Use for container liveness probes; failure means the container should be restarted.
+
+```json
+{ "status": "healthy", "version": "0.2.0" }
+```
+
+### `GET /ready` — readiness
+
+Pings all upstream dependencies and returns `200 OK` only when all pass. Returns `503 Service Unavailable` with a `failing` list on any failure. Use for load-balancer health checks and Kubernetes readiness probes — failure removes the instance from rotation without restarting it.
+
+**Dependencies checked:**
+
+| Check key | Dependency |
+|---|---|
+| `dynamodb_ratelimit` | DynamoDB rate-limits table |
+| `dynamodb_idempotency` | DynamoDB idempotency table |
+| `kinesis` | Kinesis stream |
+
+**200 response:**
+```json
+{ "status": "ready", "checks": { "dynamodb_ratelimit": true, "dynamodb_idempotency": true, "kinesis": true } }
+```
+
+**503 response (one or more dependencies failing):**
+```json
+{
+  "status": "not ready",
+  "checks": { "dynamodb_ratelimit": false, "dynamodb_idempotency": true, "kinesis": true },
+  "failing": ["DynamoDB (rate-limit): Connection refused"]
+}
+```
+
+Each failure is logged at `WARN` level so log-based alerts can be wired upstream.
+
+## Metrics
+
+Metrics are published to **CloudWatch** when deployed to AWS via [`MetricsPublisher`](src/main/scala/metrics/MetricsPublisher.scala).
+
+### Key metrics
+
+| Metric name | Unit | Description |
+|---|---|---|
+| `RateLimitAllowed` | Count | Requests allowed through |
+| `RateLimitBlocked` | Count | Requests rejected (rate limit exceeded) |
+| `RateLimitOCCRetry` | Count | OCC conditional-write retries; high values indicate key contention |
+| `RateLimitLatency` | Milliseconds | End-to-end latency of a rate-limit check |
+| `DroppedKinesisEvent` | Count | Events dropped because the drain queue was full; indicates Kinesis back-pressure |
+| `CorruptStateRead` | Count | DynamoDB items with unparseable state; non-zero indicates data issues |
+
+### Flush behaviour
+
+Metrics are buffered in memory and flushed to CloudWatch:
+- **Periodic:** every `metrics.flush-interval = 60s`
+- **Threshold:** when buffer reaches `metrics.flush-threshold = 1000` entries (async flush triggered immediately)
+- **Shutdown:** `Resource.onFinalize` flushes remaining entries before the process exits
+
+Buffer is capped at `metrics.max-buffer-size = 50000` entries; oldest entries are dropped when full (observable via `DroppedMetric` if added).
+
+### CloudWatch namespace
+
+Default namespace: `RateLimiter`. Override with `METRICS_NAMESPACE`.
+
+### Prometheus / custom backends
+
+To export to Prometheus or another system, implement the `MetricsPublisher[F]` interface and wire it in `Main.scala`. No other changes needed.
 
 ## Features
 

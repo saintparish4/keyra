@@ -113,6 +113,8 @@ class RateLimitApi[F[_]: Async](
           )
     yield response
 
+  // config.profiles is Map[String, RateLimitProfileConfig] built once at startup,
+  // so the .get lookup here is O(1) amortized regardless of profile count.
   private def getProfile(
       tier: ClientTier,
       profileName: Option[String],

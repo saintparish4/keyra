@@ -132,8 +132,8 @@
 
 The service supports two algorithms behind the same RateLimitStore abstraction:
 
-- **Token bucket (default):** Refill by elapsed time; allows burst up to capacity. State: tokens, lastRefillMs, version. See "Rate limit table" and "Rate limit check path" above.
-- **Leaky bucket:** Drain (leak) by elapsed time; smooths output, no large burst. State: level, lastLeakMs, version. Same DynamoDB schema (tokens→level, lastRefillMs→lastLeakMs); same OCC and retry policy.
+- **Token bucket (default):** Refill by elapsed time; allows burst up to capacity. State: tokens, lastRefillMs, version. See "Rate limit table" and "Rate limit check path" above. The canonical refill formula and all invariants are defined in [`core/TokenBucket.scala`](../src/main/scala/core/TokenBucket.scala) — both the DynamoDB store and the in-memory store delegate to it.
+- **Leaky bucket:** Drain (leak) by elapsed time; smooths output, no large burst. State: level, lastLeakMs, version. Same DynamoDB schema (tokens→level, lastRefillMs→lastLeakMs); same OCC and retry policy. Implemented in [`storage/LeakyBucketRateLimitStore.scala`](../src/main/scala/storage/LeakyBucketRateLimitStore.scala); enabled via `rate-limit.algorithm = "leaky-bucket"` in config.
 
 Trade-offs:
 
@@ -160,6 +160,19 @@ Selection is by configuration: rate-limit.algorithm = "token-bucket" | "leaky-bu
 
 - **Pessimistic locking:** Would require a distributed lock store (e.g. Redis, DynamoDB-based lock table) and lock lifecycle (acquire, extend, release). Adds complexity, deadlock/lease handling, and another failure mode.
 - **OCC (chosen):** Uses DynamoDB conditional writes only: no separate lock service. Under low-to-moderate contention (typical for per-key rate limits), retries (1 ms delay, max 10) usually succeed. Under high contention we **reject** after max retries to preserve correctness (no over-issuing). Simpler and good enough for the target workload.
+
+**Performance characteristics**
+
+Each rate-limit check requires exactly **two DynamoDB round-trips** in the uncontended case:
+
+1. `GetItem` (consistent read) — fetch current token-bucket state for `pk = "ratelimit#<key>"`.
+2. `PutItem` (conditional write) — write updated state with `version = :expectedVersion` (or `attribute_not_exists(pk)` for first write).
+
+Under contention (concurrent writes to the same key), a `ConditionalCheckFailedException` triggers a retry: the caller re-reads (1 more `GetItem`) and re-writes (1 more `PutItem`). With up to 10 retries, the **worst-case cost per check is 20 DynamoDB round-trips**. This is the honest price of distributed correctness without a lock service.
+
+At typical per-user or per-API-key traffic (low single-key concurrency), the common case is 2 round-trips. The 20-round-trip scenario occurs only when many instances race on the exact same key in the same millisecond window.
+
+*Known improvement path:* A single-round-trip implementation is possible by replacing `GetItem + conditional PutItem` with a single `UpdateItem` expression (`SET tokens = tokens - :cost IF tokens >= :cost`). This halves DynamoDB consumption under normal load and improves latency, but requires restructuring the refill logic into a DynamoDB expression. This is tracked as a future optimisation.
 
 ---
 
