@@ -11,6 +11,7 @@ import cats.syntax.all.*
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.*
 import core.{RateLimitDecision, RateLimitProfile, RateLimitStore}
+import DynamoDBOps.*
 
 /** DynamoDB implementation of RateLimitStore using leaky bucket algorithm.
   *
@@ -127,9 +128,10 @@ class LeakyBucketRateLimitStore[F[_]: Async](
     .map(_.getOrElse(LeakyBucketState(0.0, now, 0L)))
 
   private def getState(key: String): F[Option[LeakyBucketState]] =
-    val request = GetItemRequest.builder().tableName(tableName).key(
-      Map("pk" -> AttributeValue.builder().s(s"ratelimit#$key").build()).asJava,
-    ).consistentRead(true).build()
+    val request = GetItemRequest.builder().tableName(tableName)
+      .key(Map("pk" -> attr(s"ratelimit#$key")).asJava)
+      .consistentRead(true)
+      .build()
     Async[F].fromCompletableFuture(
       Async[F].delay(client.getItem(request).toCompletableFuture),
     ).map(response =>
@@ -152,32 +154,26 @@ class LeakyBucketRateLimitStore[F[_]: Async](
       ttlSeconds: Long,
   ): F[Boolean] =
     val ttl = System.currentTimeMillis() / 1000 + ttlSeconds
+
     val item = Map(
-      "pk" -> AttributeValue.builder().s(s"ratelimit#$key").build(),
-      "tokens" -> AttributeValue.builder().n(newState.level.toString).build(),
-      "lastRefillMs" -> AttributeValue.builder().n(newState.lastLeakMs.toString)
-        .build(),
-      "version" -> AttributeValue.builder().n(newState.version.toString).build(),
-      "ttl" -> AttributeValue.builder().n(ttl.toString).build(),
+      "pk"           -> attr(s"ratelimit#$key"),
+      "tokens"       -> attrND(newState.level),
+      "lastRefillMs" -> attrN(newState.lastLeakMs),
+      "version"      -> attrN(newState.version),
+      "ttl"          -> attrN(ttl),
     )
-    val requestBuilder = PutItemRequest.builder().tableName(tableName)
-      .item(item.asJava)
+
+    val requestBuilder = PutItemRequest.builder().tableName(tableName).item(item.asJava)
     val request =
       if expectedVersion == 0L then
         requestBuilder.conditionExpression("attribute_not_exists(pk)").build()
       else
-        requestBuilder.conditionExpression("version = :expectedVersion")
-          .expressionAttributeValues(
-            Map(
-              ":expectedVersion" -> AttributeValue.builder()
-                .n(expectedVersion.toString).build(),
-            ).asJava,
-          ).build()
-    Async[F].fromCompletableFuture(
-      Async[F].delay(client.putItem(request).toCompletableFuture),
-    ).map(_ => true).recover { case _: ConditionalCheckFailedException =>
-      false
-    }
+        requestBuilder
+          .conditionExpression("version = :expectedVersion")
+          .expressionAttributeValues(Map(":expectedVersion" -> attrN(expectedVersion)).asJava)
+          .build()
+
+    conditionalPut(client, request)
 
   private case class LeakyBucketState(
       level: Double,

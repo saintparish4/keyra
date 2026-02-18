@@ -17,6 +17,7 @@ import core.{
   IdempotencyRecord, IdempotencyResult, IdempotencyStatus, IdempotencyStore,
   StoredResponse,
 }
+import DynamoDBOps.*
 
 /** DynamoDB implementation of IdempotencyStore.
   *
@@ -85,26 +86,22 @@ class DynamoDBIdempotencyStore[F[_]: Async](
           "SET #status = :status, #response = :response, #updatedAt = :updatedAt, #version = #version + :one",
         ).conditionExpression("#status = :pending").expressionAttributeNames(
           Map(
-            "#status" -> "status",
-            "#response" -> "response",
+            "#status"    -> "status",
+            "#response"  -> "response",
             "#updatedAt" -> "updatedAt",
-            "#version" -> "version",
+            "#version"   -> "version",
           ).asJava,
         ).expressionAttributeValues(
           Map(
-            ":status" -> attr("Completed"),
-            ":response" -> attr(response.asJson.noSpaces),
+            ":status"    -> attr("Completed"),
+            ":response"  -> attr(response.asJson.noSpaces),
             ":updatedAt" -> attrN(now.toEpochMilli),
-            ":pending" -> attr("Pending"),
-            ":one" -> attrN(1),
+            ":pending"   -> attr("Pending"),
+            ":one"       -> attrN(1),
           ).asJava,
         ).build()
 
-      result <- Async[F].fromCompletableFuture(
-        Async[F].delay(client.updateItem(request).toCompletableFuture),
-      ).map(_ => true).recover { case _: ConditionalCheckFailedException =>
-        false
-      }
+      result <- conditionalUpdate(client, request)
     yield result
 
   override def markFailed(idempotencyKey: String): F[Boolean] =
@@ -118,22 +115,19 @@ class DynamoDBIdempotencyStore[F[_]: Async](
           Map("#status" -> "status", "#updatedAt" -> "updatedAt").asJava,
         ).expressionAttributeValues(
           Map(
-            ":status" -> attr("Failed"),
+            ":status"    -> attr("Failed"),
             ":updatedAt" -> attrN(now.toEpochMilli),
           ).asJava,
         ).build()
 
-      result <- Async[F].fromCompletableFuture(
-        Async[F].delay(client.updateItem(request).toCompletableFuture),
-      ).map(_ => true).recover { case _: ConditionalCheckFailedException =>
-        false
-      }
+      result <- conditionalUpdate(client, request)
     yield result
 
   override def get(idempotencyKey: String): F[Option[IdempotencyRecord]] =
     val request = GetItemRequest.builder().tableName(tableName)
       .key(Map("pk" -> attr(s"idempotency#$idempotencyKey")).asJava)
-      .consistentRead(true).build()
+      .consistentRead(true)
+      .build()
 
     Async[F].fromCompletableFuture(
       Async[F].delay(client.getItem(request).toCompletableFuture),
@@ -159,25 +153,22 @@ class DynamoDBIdempotencyStore[F[_]: Async](
     val ttl = now.getEpochSecond + ttlSeconds
 
     val item = Map(
-      "pk" -> attr(s"idempotency#$idempotencyKey"),
-      "clientId" -> attr(clientId),
-      "status" -> attr("Pending"),
+      "pk"        -> attr(s"idempotency#$idempotencyKey"),
+      "clientId"  -> attr(clientId),
+      "status"    -> attr("Pending"),
       "createdAt" -> attrN(now.toEpochMilli),
       "updatedAt" -> attrN(now.toEpochMilli),
-      "version" -> attrN(1),
-      "ttl" -> attrN(ttl),
+      "version"   -> attrN(1),
+      "ttl"       -> attrN(ttl),
     )
 
     val request = PutItemRequest.builder().tableName(tableName).item(item.asJava)
       .conditionExpression("attribute_not_exists(pk) OR #status = :failed")
       .expressionAttributeNames(Map("#status" -> "status").asJava)
-      .expressionAttributeValues(Map(":failed" -> attr("Failed")).asJava).build()
+      .expressionAttributeValues(Map(":failed" -> attr("Failed")).asJava)
+      .build()
 
-    Async[F].fromCompletableFuture(
-      Async[F].delay(client.putItem(request).toCompletableFuture),
-    ).map(_ => true).recover { case _: ConditionalCheckFailedException =>
-      false
-    }
+    conditionalPut(client, request)
 
   private def parseRecord(
       idempotencyKey: String,
@@ -190,7 +181,7 @@ class DynamoDBIdempotencyStore[F[_]: Async](
       case _ => IdempotencyStatus.Pending
 
     val response = item.get("response")
-      .flatMap(attr => decode[StoredResponse](attr.s()).toOption)
+      .flatMap(av => decode[StoredResponse](av.s()).toOption)
 
     val createdAt = item.get("createdAt")
       .map(a => Instant.ofEpochMilli(a.n().toLong)).getOrElse(Instant.now())
@@ -208,13 +199,6 @@ class DynamoDBIdempotencyStore[F[_]: Async](
       ttl = item.get("ttl").map(_.n().toLong).getOrElse(0L),
       version = item.get("version").map(_.n().toLong).getOrElse(0L),
     )
-
-  // Helper methods for building AttributeValues
-  private def attr(s: String): AttributeValue = AttributeValue.builder().s(s)
-    .build()
-
-  private def attrN(n: Long): AttributeValue = AttributeValue.builder()
-    .n(n.toString).build()
 
 object DynamoDBIdempotencyStore:
   def apply[F[_]: Async](

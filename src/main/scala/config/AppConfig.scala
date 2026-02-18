@@ -47,6 +47,7 @@ case class KinesisConfig(
 case class MetricsConfig(
     enabled: Boolean = true,
     namespace: String = "RateLimiter",
+    maxBufferSize: Int = 50000,
 ) derives ConfigReader
 
 // Security configuration
