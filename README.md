@@ -4,29 +4,34 @@
 [![Scala](https://img.shields.io/badge/scala-3.7.4-red.svg)](https://www.scala-lang.org/)
 [![CI](https://github.com/your-org/scalax/workflows/CI/badge.svg)](https://github.com/your-org/scalax/actions)
 
-### Guarantees
+A distributed rate limiter and idempotency service built with Scala 3, Cats Effect, and DynamoDB. Enforces per-key request limits correctly across multiple stateless instances — without a lock service.
 
-- **At-most-X RPS per key globally.** Each key is limited by a token bucket: configurable **capacity** (burst cap) and **refill rate** (tokens per second). Tokens never exceed capacity; consumption is bounded so that over any window, allowed requests respect the configured rate.
-- **Optional leaky bucket.** A second algorithm (leaky bucket) is available via configuration; it smooths output (no burst) instead of allowing burst up to capacity.
-- **Correctness under concurrent updates.** The rate limiter uses **optimistic concurrency control (OCC)** on DynamoDB: conditional writes on a version field ensure only one successful update per logical state change. Under contention we retry (fixed 1ms delay, max 10 retries); after exhaustion we reject to preserve safety.
-- **Idempotent writes within a time window.** Idempotency is **first-writer-wins** across instances. The first successful write for an idempotency key wins; duplicates within the key’s **TTL** (configurable; e.g. 24h default for idempotency check, 1h for rate-limit bucket state) receive the stored response. TTL and DynamoDB cleanup prevent unbounded growth.
+### What this system guarantees
 
-### Failure modes designed for
+| Guarantee | Mechanism |
+|-----------|-----------|
+| **At-most-X RPS per key, globally** | Token bucket per key stored in DynamoDB; OCC (version-based conditional writes) ensures only one instance consumes tokens per logical state change. Tokens never exceed capacity; over any window, allowed requests respect the configured rate. |
+| **Idempotent operations within TTL** | First-writer-wins via DynamoDB conditional `PutItem`. The first successful write for a key wins; duplicates within the TTL window receive the stored response. TTL auto-expiry prevents unbounded table growth. |
+| **Stateless instances** | All rate-limit and idempotency state lives in DynamoDB. Any instance can serve any request; crashes and restarts lose no consistency. |
 
-- **Partial DynamoDB outages:** Retries with backoff (DynamoDB client and resilience config), plus a **circuit breaker** around DynamoDB so repeated failures stop hammering the store; metrics record circuit state for alerting.
-- **Instance crashes:** Services are **stateless**; all rate-limit and idempotency state lives in DynamoDB. Any instance can serve any request; restarts do not lose consistency.
-- **Clock skew:** Token refill and idempotency use **Clock.realTime** (wall clock) for timestamps; refill uses elapsed time between reads. Instances should have synchronized clocks—large skew between instances could affect refill and TTL accuracy (documented trade-off).
-- **Retries (client and internal):** Idempotency keys make client retries safe (same key returns the same result). OCC retries are bounded (max 10) so we fail predictably under extreme contention instead of spinning.
+### What this system is designed to survive
 
-### What this system is built around
+| Failure mode | Behaviour |
+|-------------|-----------|
+| **Partial DynamoDB outage** | DynamoDB client retries with backoff; a circuit breaker stops hammering a failing store. Rate-limit store fails open (allow) on corrupt state with an `ERROR` log and `CorruptStateRead` metric. Readiness probe removes the instance from rotation on dependency failure. |
+| **Instance crash** | No in-process state. The next instance reads current DynamoDB state and continues correctly. |
+| **Kinesis failure** | Bounded in-memory queue drains to Kinesis; on transient failure one retry, then drop with `DroppedKinesisEvent` metric. The request path is never blocked waiting for Kinesis. |
+| **OCC exhaustion under extreme contention** | After 10 failed conditional writes for the same key in the same window, the request is **rejected** (429). The service under-issues at the tail rather than over-issuing past the rate limit. |
 
-1. **Distributed token-bucket rate limiting with OCC on DynamoDB** — correct, coordinated consumption across instances without a separate lock service.
-2. **Distributed idempotency with first-writer-wins** — exactly-once semantics for critical operations across replicas.
-3. **Event streaming and observability** — rate-limit decisions are published to **Kinesis** with **fire-and-forget** semantics (no back-pressure on the request path). Observability today means: structured logs, health/ready endpoints, and CloudWatch metrics (allowed/blocked, latency); optional back-pressure or consumer lag handling would be a separate design.
+### Three hard problems this is built around
+
+1. **Distributed token-bucket correctness** — coordinating token consumption across instances without a separate lock service. OCC on DynamoDB version fields is the mechanism; see [OCC flow](#optimistic-concurrency-control-flow) and [performance characteristics](docs/ARCHITECTURE.md).
+2. **Idempotency under concurrency** — exactly-one-Created semantics when many concurrent callers hit the same key simultaneously. Conditional writes (`attribute_not_exists(pk)`) plus consistent reads are the mechanism; see [Idempotency](#idempotency).
+3. **Back-pressure on event publishing** — Kinesis publishing must not block the request path or lose events silently. A bounded queue with a background drain fiber and observable drop counter is the mechanism; see [Metrics](#metrics).
 
 ---
 
-**Note:** AWS deployment and performance have not been tested; the stack is designed for AWS but validated locally (e.g. LocalStack/Docker).
+**Note:** AWS deployment and performance have not been tested end-to-end; the stack is designed for AWS but validated locally with LocalStack/Docker.
 
 ## Architecture
 
@@ -83,24 +88,103 @@ sequenceDiagram
 
 See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design decisions.
 
-## Product Vision
+## Quickstart in 5 Minutes
 
-This platform provides a scalable, high-performance rate limiting service that enables applications to:
-- **Control API usage** with configurable rate limits using token bucket algorithm
-- **Ensure idempotency** for critical operations with first-writer-wins semantics
-- **Stream events** to AWS Kinesis for real-time analytics and monitoring
-- **Scale horizontally** to handle high-throughput workloads (AWS performance not yet tested)
+> Prerequisites: Docker 20.10+ and `docker-compose`. No AWS account needed for local development.
 
-The platform offers distributed rate limiting that works seamlessly across multiple service instances while maintaining consistency and performance.
+**Step 1 — Start LocalStack (DynamoDB + Kinesis emulation)**
 
-## Quick Start
+```bash
+docker-compose up -d
+```
 
-### Prerequisites
+Expected output: LocalStack container starts; the init script creates the DynamoDB tables and Kinesis stream automatically.
 
-- Scala 3.7.4+, SBT 1.9+
-- Docker 20.10+ (for local development)
-- AWS CLI 2.x (optional, for future AWS deployment)
-- Terraform 1.5+ (optional, for AWS deployment)
+**Step 2 — Verify the service is alive**
+
+```bash
+curl http://localhost:8080/health
+```
+
+```json
+{ "status": "healthy", "version": "0.2.0" }
+```
+
+**Step 3 — Check a rate limit (allowed)**
+
+```bash
+curl -s -X POST http://localhost:8080/v1/ratelimit/check \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-api-key" \
+  -d '{"key": "user:demo", "cost": 1}' | jq .
+```
+
+```json
+{
+  "allowed": true,
+  "tokensRemaining": 99,
+  "limit": 100,
+  "resetAt": "2025-01-15T10:30:05Z",
+  "retryAfter": null
+}
+```
+
+**Step 4 — Exhaust the bucket (rate-limited response)**
+
+Run this ~105 times quickly to drain the `basic` tier bucket (100 token capacity):
+
+```bash
+# bash / zsh
+for i in $(seq 1 105); do
+  curl -s -X POST http://localhost:8080/v1/ratelimit/check \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer test-api-key" \
+    -d '{"key": "user:demo", "cost": 1}' | jq -r '.allowed'
+done
+```
+
+After ~100 successful requests, the bucket empties and the service returns 429:
+
+```json
+{
+  "allowed": false,
+  "tokensRemaining": null,
+  "limit": 100,
+  "resetAt": "2025-01-15T10:30:05Z",
+  "retryAfter": 5,
+  "message": "Rate limit exceeded"
+}
+```
+
+**Step 5 — Idempotent POST (first call — New)**
+
+```bash
+curl -s -X POST http://localhost:8080/v1/idempotency/check \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-api-key" \
+  -d '{"idempotencyKey": "payment:demo-001", "ttl": 3600}' | jq .
+```
+
+```json
+{ "status": "new", "idempotencyKey": "payment:demo-001" }
+```
+
+**Step 6 — Replay the same key (duplicate detected)**
+
+```bash
+curl -s -X POST http://localhost:8080/v1/idempotency/check \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-api-key" \
+  -d '{"idempotencyKey": "payment:demo-001", "ttl": 3600}' | jq .
+```
+
+```json
+{ "status": "in_progress", "idempotencyKey": "payment:demo-001" }
+```
+
+The second call sees the existing `Pending` record and returns `in_progress` — the client knows not to rerun the payment. Once the operation is completed via `/v1/idempotency/:key/complete`, further replays return `duplicate` with the stored response body.
+
+---
 
 ## Infrastructure / Deploy
 
@@ -373,218 +457,130 @@ curl -X POST http://localhost:8080/v1/ratelimit/check \
 
 ### Load Testing
 
-```bash
-# Run load tests against local instance
-./scripts/load-test.sh dev baseline
+**k6 scenarios** (requires [k6](https://k6.io/docs/get-started/installation/)):
 
-# Run quick load tests against local instance
+```bash
+# Quick smoke test (30s, 10 VUs, many unique keys)
 ./scripts/load-test.sh dev quick
 
-# For more options, see the script help
-./scripts/load-test.sh --help
+# Baseline: ramp 0→50→100 VUs over 16 minutes, many unique keys
+./scripts/load-test.sh dev baseline
+
+# High-contention: 50 VUs all hammering the same key for 60s
+# Purpose: stress OCC retry path, measure latency and rejection rate under hot-key load
+./scripts/load-test.sh dev highContention
 ```
+
+**Scala load simulator** (no k6 required):
+
+```bash
+# Start the server first:
+make dev   # or: docker-compose up -d && sbt run
+
+# Then run a scenario:
+sbt "loadSim/run --scenario normal"          # 20 VUs, 500 unique keys, 60s
+sbt "loadSim/run --scenario burst"           # 50 VUs, 50 keys (more contention), 60s
+sbt "loadSim/run --scenario idempotency"     # 30 VUs, 5 shared keys — verifies exactly-one-Created
+sbt "loadSim/run --scenario realistic"       # 40 VUs, 80% rate-limit / 20% idempotency
+sbt "loadSim/run --scenario highContention"  # 50 VUs, 1 fixed key — OCC stress test
+```
+
+| Scenario | VUs | Keys | Purpose |
+|----------|-----|------|---------|
+| `normal` | 20 | 500 | Base throughput, many unique keys |
+| `burst` | 50 | 50 | Token refill behaviour under burst |
+| `idempotency` | 30 | 5 | Exactly-one-Created under concurrency |
+| `realistic` | 40 | 200 | Mixed traffic (80/20 split) |
+| `highContention` | 50 | **1** | OCC retry stress, latency and rejection rate |
+
+See [Benchmark Results](#benchmark-results) for observed numbers from each scenario.
 
 **Note:** AWS deployment instructions are not yet available as deployment has not been tested. Terraform configuration exists but requires validation.
 
-## Performance
+<a name="benchmark-results"></a>
 
-Performance and scalability on AWS have not been tested. The design targets low-latency rate-limit checks and horizontal scaling via ECS and DynamoDB; run your own load tests when deploying to AWS.
+## Benchmark Results
 
-## API Examples
+> Numbers are from local testing with LocalStack + Docker on a 6-core dev machine. AWS production performance will differ based on region and DynamoDB configuration.
 
-### Check Rate Limit
+### Scenario 1 — Many keys (normal load)
 
-```bash
-curl -X POST http://localhost:8080/v1/ratelimit/check \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test-api-key" \
-  -d '{
-    "key": "user:12345",
-    "cost": 1
-  }'
-```
+Scala loadSim: 20 VUs, 500 unique keys, 60 seconds. k6 quick: 10 VUs, 1,000 keys, 30 seconds.
 
-**Note:** Use `test-api-key`, `admin-api-key`, or `free-api-key` for local development. Algorithm is selected by configuration (rate-limit.algorithm or RATE_LIMIT_ALGORITHM).
+| Metric | loadSim `normal` | k6 `quick` |
+|--------|-----------------|------------|
+| Total requests | 3,014 | 300 |
+| Throughput | ~50 RPS | ~10 RPS |
+| Allowed | 100% | 100% |
+| Blocked | 0% | 0% |
+| Errors | 0 | 0% |
+| P50 latency | — | 49 ms |
+| P95 latency | — | 98 ms |
+| P99 latency | — | 305 ms |
 
-**Response (Allowed):**
-```json
-{
-  "allowed": true,
-  "tokensRemaining": 95,
-  "limit": 100,
-  "resetAt": "2024-01-15T10:30:00Z",
-  "retryAfter": null
-}
-```
+**Takeaway:** With many unique keys, virtually no OCC contention occurs — every request succeeds on the first conditional write attempt. All tokens remain available because VUs spread across hundreds of keys never exhaust any single bucket. Latency is dominated by LocalStack networking overhead; expect significantly lower latency against real DynamoDB in the same region.
 
-**Response (Rate Limited - 429):**
-```json
-{
-  "allowed": false,
-  "tokensRemaining": null,
-  "limit": 100,
-  "resetAt": "2024-01-15T10:30:00Z",
-  "retryAfter": 5,
-  "message": "Rate limit exceeded"
-}
-```
+---
 
-### Check Idempotency
+### Scenario 2 — Single hot key (highContention)
 
-```bash
-curl -X POST http://localhost:8080/v1/idempotency/check \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test-api-key" \
-  -d '{
-    "idempotencyKey": "payment:abc-123",
-    "ttl": 86400
-  }'
-```
+50 VUs all targeting `contention:single-hot-key` for 60 seconds. Every request races on the same DynamoDB item — worst case for OCC.
 
-### Complete Idempotency Operation
+| Metric | loadSim `highContention` | k6 `highContention` |
+|--------|-------------------------|---------------------|
+| Total requests | 284 | 700 |
+| Throughput | ~4 RPS | ~8 RPS |
+| Allowed | 104 (36%) | 409 (58%) |
+| Blocked (429) | 180 (63%) | 291 (42%) |
+| P50 latency | — | 3.33 s |
+| P90 latency | — | 9.97 s |
+| P95 latency | — | 11.25 s |
+| P99 latency | — | 13.25 s |
+| Avg latency | 9,693 ms | 4,400 ms |
+| Max latency | 17,836 ms | 15,770 ms |
 
-```bash
-curl -X POST http://localhost:8080/v1/idempotency/payment:abc-123/complete \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test-api-key" \
-  -d '{
-    "statusCode": 201,
-    "body": "{\"paymentId\": \"pay_xyz789\"}",
-    "headers": {"Content-Type": "application/json"}
-  }'
-```
+**Takeaway:** Throughput drops from ~50 RPS to 4–8 RPS — a **6–12× reduction** — solely from OCC contention on a single key. With 50 VUs racing on one DynamoDB item, most conditional writes fail and must retry (re-read + re-write), up to 10 times per attempt. P99 latency climbs to 13 seconds. The allowed/blocked split varies between runs (36–58% allowed) depending on LocalStack state and timing; the bucket refills between contended rounds so it is not permanently empty.
 
-See [API Documentation](docs/API.md) for complete reference.
-
-## Testing
-
-```bash
-# Unit tests
-sbt test
-
-# Integration tests (requires Docker)
-sbt it:test
-
-# Test coverage
-sbt clean coverage test coverageReport
-
-# Load testing
-./scripts/load-test.sh
-```
-
-## Project Structure
+The k6 thresholds intentionally fail under this scenario — they are tuned for normal multi-key traffic:
 
 ```
-scala-rate-limiter-platform/
-├── src/
-│   ├── main/scala/com/ratelimiter/
-│   │   ├── Main.scala                 # Application entry point
-│   │   ├── api/                       # HTTP routes and handlers
-│   │   ├── core/                      # Core rate limiting logic
-│   │   ├── storage/                   # DynamoDB implementations
-│   │   ├── events/                    # Kinesis event publishing
-│   │   ├── metrics/                   # CloudWatch metrics
-│   │   └── config/                    # Configuration
-│   └── test/scala/                    # Tests
-├── terraform/
-│   ├── modules/                       # Reusable Terraform modules
-│   │   ├── ecs/                       # ECS Fargate
-│   │   ├── dynamodb/                  # DynamoDB tables
-│   │   ├── kinesis/                   # Kinesis streams
-│   │   └── networking/                # VPC, subnets, security groups
-│   └── environments/                  # Environment-specific configs
-│       ├── dev/
-│       ├── staging/
-│       └── prod/
-├── docs/                              # Documentation (API, Architecture)
-├── scripts/                            # Utility scripts (load-test.sh)
-└── docker-compose.yml                 # Local development setup
+✗ p(99)<200ms   → actual 13.25s     (OCC retries dominate)
+✗ p(95)<500ms   → actual 11.25s
+✗ error rate<1% → actual 41.57%     (429s counted as failures by k6)
 ```
 
-## Security
+To observe OCC retries in production: watch the `RateLimitOCCRetry` CloudWatch metric. A spike that coincides with latency spikes confirms the retry overhead as the source. This is the honest cost of distributed correctness without a lock service — the system stays **safe** (never over-issues) at the expense of throughput and tail latency under hot-key load.
 
-- **Authentication:** API key-based authentication (implemented)
-- **Rate Limiting:** Built-in rate limiting for authentication attempts
+---
 
-**Note:** AWS-specific security features (IAM roles, VPC, Secrets Manager, CloudWatch Logs) are planned but not yet tested. See [Architecture Documentation](docs/ARCHITECTURE.md) for security design.
+### Scenario 3 — All loadSim scenarios summary
 
-## Monitoring & Alerting
+| Scenario | VUs | Keys | Total | RPS | Allowed | Blocked | Notes |
+|----------|-----|------|-------|-----|---------|---------|-------|
+| `normal` | 20 | 500 | 3,014 | ~50 | 100% | 0% | Baseline — no contention |
+| `burst` | 50 | 50 | 1,935 | ~32 | 100% | 0% | More keys-per-VU contention lowers RPS |
+| `idempotency` | 30 | 5 | 524 | ~17 | 5 created | 519 dup | Exactly-one-Created proven |
+| `realistic` | 40 | 200 | 2,144 | ~35 | 78% RL | 21% idem | Mixed traffic matches 80/20 target |
+| `highContention` | 50 | **1** | 284 | ~4 | 36% | 63% | OCC stress — avg 9.7s latency |
 
-**CloudWatch (when deployed to AWS):**
-- Alarms for high error rate, high latency, DynamoDB throttles, and low ECS task count
-- Dashboards for request rate, latency, rate-limit decisions, DynamoDB, and ECS health
+---
 
-AWS monitoring has not been tested. Operational runbooks are not yet available.
+### In-memory vs Distributed comparison
 
-## CI/CD Pipeline
+The `InMemoryRateLimitStore` uses a `Ref[F, Map[String, BucketState]]` — no network I/O, just in-process atomic state.
 
-GitHub Actions CI runs on every push and pull request:
+| Metric | In-memory store | DynamoDB store (LocalStack) | Ratio |
+|--------|----------------|----------------------------|-------|
+| P50 latency | < 1 ms | ~49 ms (k6 measured) | ~50× |
+| P99 latency | < 5 ms (est.) | ~305 ms (k6 normal) | ~60× |
+| Throughput (20 VUs) | ~2,000+ RPS (est.) | ~50 RPS (measured) | ~40× |
+| OCC retry rate | 0% (no OCC needed) | ~0% (normal), ~40% (hot key) | — |
+| Single-instance correctness | Yes | Yes | — |
+| Multi-instance correctness | **No** (state is per-process) | **Yes** | — |
 
-- ✅ Compile with SBT
-- ✅ Run unit tests
-- ✅ Run integration tests (with LocalStack via Docker)
-- ✅ Build Docker image
+**Interpretation:** The DynamoDB store is ~50× slower at P50 on a single machine — all of that overhead is the distributed coordination cost (2 DynamoDB round-trips per check via LocalStack). For rate limiting, this is acceptable: a 49 ms P50 for a rate-limit check at the edge of your API is small relative to the business logic it protects. Against real DynamoDB in the same region (not LocalStack), expect 5–10 ms P50 instead.
 
-See [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the complete workflow.
-
-**Planned (Future):**
-- Auto-deploy to dev environment on merge to `develop`
-- Auto-deploy to production on version tags
-- Security scanning
-- Performance regression testing
-
-## Technical Decisions
-
-### Token Bucket vs Sliding Window
-
-**Why Token Bucket:** The token bucket algorithm allows for configurable burst tolerance. A client can consume multiple tokens in a short period (up to the bucket capacity), then must wait for tokens to refill. This matches real-world usage patterns where legitimate users may have short bursts of activity. Sliding window algorithms are more restrictive and don't allow bursts, which can lead to false positives during legitimate traffic spikes.
-
-### Optimistic Concurrency Control vs Pessimistic Locking
-
-**Why OCC:** DynamoDB has no native distributed locking mechanism. Pessimistic locking would require implementing a separate locking service (e.g., Redis), adding complexity and a new failure mode. OCC with conditional writes scales better under low-to-moderate contention (the common case for rate limiting). Under high contention, exponential backoff ensures fairness and prevents thundering herd. The retry logic in `DynamoDBRateLimitStore` handles conflicts gracefully.
-
-### Fire-and-Forget Event Publishing
-
-**Why Async Events:** Rate limit decisions must return quickly to clients. Blocking on Kinesis publishing would add latency and create a single point of failure. Events are published asynchronously with `fire-and-forget` semantics. Failures are logged but don't affect the rate limit decision. This is the correct trade-off for analytics data vs. critical business logic.
-
-### Resource Management with Cats Effect
-
-**Why `Resource[F, _]`:** AWS SDK clients hold network connections and thread pools. Without proper cleanup, these leak in long-running applications. Cats Effect's `Resource` type ensures clients are closed on shutdown or error, preventing connection leaks in production. The `Main.scala` application uses `Resource` composition to manage the entire lifecycle declaratively.
-
-### DynamoDB as State Store
-
-**Why DynamoDB over Redis:** While Redis is faster for single-instance rate limiting, DynamoDB provides:
-- **Built-in durability** (no data loss on restart)
-- **Automatic scaling** (no capacity planning)
-- **TTL support** (automatic cleanup of expired rate limit buckets)
-- **Strong consistency** (via consistent reads) for accurate token counts
-- **No separate infrastructure** (part of AWS ecosystem)
-
-The trade-off is slightly higher latency (~5-10ms vs ~1ms), which is acceptable for rate limiting use cases.
-
-## Performance
-
-Performance benchmarks are from local testing with LocalStack. AWS production performance will vary based on region, network latency, and DynamoDB configuration.
-
-**Local Performance (LocalStack + Docker):**
-- **P50 Latency:** ~15-25ms per rate limit check
-- **P95 Latency:** ~40-60ms per rate limit check
-- **P99 Latency:** ~80-120ms per rate limit check
-- **Throughput:** Handles 200+ concurrent requests/second on a single instance
-- **OCC Retry Rate:** <1% under normal load, ~5-10% under high contention
-
-**Load Test Results:**
-Run `./scripts/load-test.sh dev baseline` to see current performance metrics. The test simulates:
-- Ramp-up from 0 to 50 concurrent users over 2 minutes
-- Sustained load at 50 users for 5 minutes
-- Ramp-up to 100 users
-- Sustained load at 100 users for 5 minutes
-
-**Expected AWS Performance:**
-- **P50 Latency:** ~5-10ms (DynamoDB in same region)
-- **P95 Latency:** ~15-25ms
-- **P99 Latency:** ~30-50ms
-- **Throughput:** Scales horizontally with ECS Fargate (tested up to 500 req/s per instance)
+The in-memory store is useful for local development and unit tests where multi-instance correctness is not needed. The critical difference: if you run two instances with the in-memory store, each instance tracks its own token bucket independently — a client can double-consume by round-robin across instances. The DynamoDB store coordinates globally via a single DynamoDB item per key as the source of truth.
 
 ## Design Highlights
 

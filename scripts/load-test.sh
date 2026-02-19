@@ -160,6 +160,15 @@ const scenarios = {
         duration: '30m', // Long-running
         startTime: '30s', // Start after warmup
     },
+    // highContention: all VUs target a single fixed key, stressing OCC retry logic.
+    // Measures: throughput degradation, OCC retry rate (RateLimitOCCRetry metric),
+    // tail latency under contention. Compare with baseline to see the cost of hot keys.
+    highContention: {
+        executor: 'constant-vus',
+        vus: 50,
+        duration: '60s',
+        startTime: '30s', // Start after warmup
+    },
 };
 
 export const options = {
@@ -180,6 +189,9 @@ export const options = {
     },
     summaryTrendStats: ['min', 'avg', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
+
+// Custom metrics for OCC contention analysis
+const occRetryRate = new Rate('occ_contention_rejection'); // 429s under high contention
 
 // Test data generators
 function randomUserId() {
@@ -292,9 +304,52 @@ export function idempotencyCheck() {
     return res;
 }
 
+// highContention: single fixed key, no sleep, maximum pressure on OCC retry path
+export function highContentionCheck() {
+    const FIXED_KEY = 'contention:single-hot-key';
+    const payload = JSON.stringify({
+        key: FIXED_KEY,
+        cost: 1,
+    });
+
+    const params = {
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer test-api-key',
+        },
+        tags: { endpoint: 'ratelimit', scenario: 'highContention' },
+    };
+
+    const res = http.post(`${BASE_URL}/v1/ratelimit/check`, payload, params);
+
+    check(res, {
+        'status is 200 or 429': (r) => r.status === 200 || r.status === 429,
+    });
+
+    if (res.status === 200) {
+        const body = JSON.parse(res.body);
+        if (body.allowed) {
+            rateLimitAllowed.add(1);
+        } else {
+            rateLimitRejected.add(1);
+            occRetryRate.add(1);
+        }
+    } else if (res.status === 429) {
+        rateLimitRejected.add(1);
+        occRetryRate.add(1);
+    }
+
+    // No sleep — we want maximum concurrency pressure on this single key
+}
+
 // Main test function
 export default function() {
-    // Mix of rate limit and idempotency checks (80/20 split)
+    if (TEST_TYPE === 'highContention') {
+        highContentionCheck();
+        return;
+    }
+
+    // Mix of rate limit and idempotency checks (80/20 split) for all other scenarios
     const rand = Math.random();
     
     if (rand < 0.8) {

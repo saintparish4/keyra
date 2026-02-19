@@ -2,6 +2,11 @@
 
 **Note:** This document describes the intended architecture. AWS deployment has not been tested. Currently only local development with docker-compose (LocalStack) is validated.
 
+**Cross-references:**
+- Token-bucket refill formula and invariants: [`core/TokenBucket.scala`](../src/main/scala/core/TokenBucket.scala) — both the DynamoDB store and the in-memory store delegate to it. The canonical formula is reproduced in [Rate limit check path](#rate-limit-check-path) below.
+- OCC conditional-write policy, retry count, and high-contention behaviour: [`storage/DynamoDBRateLimitStore.scala`](../src/main/scala/storage/DynamoDBRateLimitStore.scala). Two-round-trip cost analysis is in [Performance characteristics](#performance-characteristics).
+- Leaky-bucket implementation: [`storage/LeakyBucketRateLimitStore.scala`](../src/main/scala/storage/LeakyBucketRateLimitStore.scala).
+
 ### High-Level Design
 
 ```
@@ -160,6 +165,8 @@ Selection is by configuration: rate-limit.algorithm = "token-bucket" | "leaky-bu
 
 - **Pessimistic locking:** Would require a distributed lock store (e.g. Redis, DynamoDB-based lock table) and lock lifecycle (acquire, extend, release). Adds complexity, deadlock/lease handling, and another failure mode.
 - **OCC (chosen):** Uses DynamoDB conditional writes only: no separate lock service. Under low-to-moderate contention (typical for per-key rate limits), retries (1 ms delay, max 10) usually succeed. Under high contention we **reject** after max retries to preserve correctness (no over-issuing). Simpler and good enough for the target workload.
+
+<a name="performance-characteristics"></a>
 
 **Performance characteristics**
 

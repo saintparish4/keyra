@@ -73,5 +73,6 @@ lazy val loadSim = project.in(file("loadSim")).settings(
     "org.http4s" %% "http4s-circe" % Http4sVersion,
     "io.circe" %% "circe-generic" % CirceVersion,
     "io.circe" %% "circe-parser" % CirceVersion,
+    "ch.qos.logback" % "logback-classic" % "1.5.19" % Runtime,
   ),
 )

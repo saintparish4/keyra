@@ -43,6 +43,7 @@ logs/
 
 # Test output
 test-output/
+test-results/
 
 # Misc
 book/

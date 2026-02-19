@@ -22,5 +22,7 @@ object StoreError:
   * [[StoreError.CorruptRecord]] while decoding a stored idempotency record.
   * Caught at the HTTP layer and mapped to 503.
   */
-final class CorruptIdempotencyRecordException(val key: String, val detail: String)
-    extends RuntimeException(s"Corrupt idempotency record key=$key: $detail")
+final class CorruptIdempotencyRecordException(
+    val key: String,
+    val detail: String,
+) extends RuntimeException(s"Corrupt idempotency record key=$key: $detail")
