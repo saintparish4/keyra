@@ -36,7 +36,17 @@ jobs:
       run: |
         docker compose up -d localstack
         echo "Waiting for LocalStack to be ready..."
-        timeout 120 bash -c 'until curl -s http://localhost:4566/_localstack/health | grep -q "dynamodb.*running"; do sleep 2; done'
+        for i in $(seq 1 90); do
+          if (curl -sf http://localhost:4566/_localstack/health || true) | grep -qE 'dynamodb.*(running|available)|(running|available).*dynamodb'; then
+            echo "LocalStack ready after ${i} attempts."
+            exit 0
+          fi
+          echo "Attempt $i/90: LocalStack not ready yet..."
+          sleep 2
+        done
+        echo "LocalStack health response:"
+        curl -s http://localhost:4566/_localstack/health || true
+        exit 1
         
     - name: Check formatting
       run: sbt scalafmtCheckAll
