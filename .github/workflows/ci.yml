@@ -20,7 +20,10 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        
+
+    - name: Set up SBT
+      uses: sbt/setup-sbt@v1
+
     - name: Cache SBT dependencies
       uses: actions/cache@v4
       with:
@@ -88,6 +91,9 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
+
+    - name: Set up SBT
+      uses: sbt/setup-sbt@v1
 
     - name: Cache SBT dependencies
       uses: actions/cache@v4
