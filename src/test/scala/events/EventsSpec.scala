@@ -1,12 +1,13 @@
 package events
 
+import java.time.Instant
+
 import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
 
+import io.circe.generic.auto.*
 import io.circe.parser.*
 import io.circe.syntax.*
-import io.circe.generic.auto.*
-import java.time.Instant
 
 class EventsSpec extends AnyFreeSpec with Matchers:
 
@@ -21,7 +22,7 @@ class EventsSpec extends AnyFreeSpec with Matchers:
         endpoint = "/api/v1/resource",
         tokensRemaining = 95,
         cost = 5,
-        tier = "premium"
+        tier = "premium",
       )
 
       "should have correct event type" in {
@@ -51,7 +52,7 @@ class EventsSpec extends AnyFreeSpec with Matchers:
         endpoint = "/api/v1/resource",
         retryAfterSeconds = 10,
         reason = "rate_limit_exceeded",
-        tier = "free"
+        tier = "free",
       )
 
       "should have correct event type" in {
@@ -78,7 +79,7 @@ class EventsSpec extends AnyFreeSpec with Matchers:
         timestamp = timestamp,
         idempotencyKey = "payment:order-123",
         clientId = "client-abc",
-        originalRequestTime = originalTime
+        originalRequestTime = originalTime,
       )
 
       "should have correct event type" in {
@@ -103,7 +104,7 @@ class EventsSpec extends AnyFreeSpec with Matchers:
         timestamp = timestamp,
         idempotencyKey = "payment:order-456",
         clientId = "client-xyz",
-        ttlSeconds = 86400
+        ttlSeconds = 86400,
       )
 
       "should have correct event type" in {
@@ -124,7 +125,7 @@ class EventsSpec extends AnyFreeSpec with Matchers:
 
     "Base RateLimitEvent encoder" - {
       val timestamp = Instant.ofEpochMilli(1L)
-      
+
       "should encode Allowed events" in {
         val event: RateLimitEvent = RateLimitEvent.Allowed(
           timestamp = timestamp,
@@ -133,7 +134,7 @@ class EventsSpec extends AnyFreeSpec with Matchers:
           endpoint = "/api/test",
           tokensRemaining = 10,
           cost = 1,
-          tier = "basic"
+          tier = "basic",
         )
         val json = event.asJson.noSpaces
         json should include("tokensRemaining")
@@ -148,7 +149,7 @@ class EventsSpec extends AnyFreeSpec with Matchers:
           endpoint = "/api/test",
           retryAfterSeconds = 5,
           reason = "test",
-          tier = "free"
+          tier = "free",
         )
         val json = event.asJson.noSpaces
         json should include("retryAfterSeconds")
@@ -161,7 +162,7 @@ class EventsSpec extends AnyFreeSpec with Matchers:
           timestamp = timestamp,
           idempotencyKey = "idem-key",
           clientId = "client-3",
-          originalRequestTime = originalTime
+          originalRequestTime = originalTime,
         )
         val json = event.asJson.noSpaces
         json should include("idempotencyKey")
@@ -173,7 +174,7 @@ class EventsSpec extends AnyFreeSpec with Matchers:
           timestamp = timestamp,
           idempotencyKey = "idem-key-new",
           clientId = "client-4",
-          ttlSeconds = 3600
+          ttlSeconds = 3600,
         )
         val json = event.asJson.noSpaces
         json should include("idempotencyKey")

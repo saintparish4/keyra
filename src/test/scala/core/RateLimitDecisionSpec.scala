@@ -1,13 +1,15 @@
 package core
 
-import cats.effect.IO
-import cats.effect.testing.scalatest.AsyncIOSpec
+import java.time.Instant
+
 import org.scalatest.freespec.AsyncFreeSpec
 import org.scalatest.matchers.should.Matchers
 
-import java.time.Instant
+import cats.effect.IO
+import cats.effect.testing.scalatest.AsyncIOSpec
 
-class RateLimitDecisionSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
+class RateLimitDecisionSpec
+    extends AsyncFreeSpec with AsyncIOSpec with Matchers:
 
   "RateLimitDecision" - {
     "Allowed should have allowed = true" in {
@@ -25,19 +27,27 @@ class RateLimitDecisionSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers
 
   "RateLimitProfile" - {
     "should validate positive capacity" in {
-      an[IllegalArgumentException] should be thrownBy {
-        RateLimitProfile(capacity = 0, refillRatePerSecond = 10, ttlSeconds = 3600)
-      }
+      an[IllegalArgumentException] should be thrownBy RateLimitProfile(
+        capacity = 0,
+        refillRatePerSecond = 10,
+        ttlSeconds = 3600,
+      )
     }
 
     "should validate positive refill rate" in {
-      an[IllegalArgumentException] should be thrownBy {
-        RateLimitProfile(capacity = 100, refillRatePerSecond = 0, ttlSeconds = 3600)
-      }
+      an[IllegalArgumentException] should be thrownBy RateLimitProfile(
+        capacity = 100,
+        refillRatePerSecond = 0,
+        ttlSeconds = 3600,
+      )
     }
 
     "should accept valid configuration" in {
-      val profile = RateLimitProfile(capacity = 100, refillRatePerSecond = 10, ttlSeconds = 3600)
+      val profile = RateLimitProfile(
+        capacity = 100,
+        refillRatePerSecond = 10,
+        ttlSeconds = 3600,
+      )
       profile.capacity shouldBe 100
       profile.refillRatePerSecond shouldBe 10.0
     }
@@ -45,7 +55,8 @@ class RateLimitDecisionSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers
 
   "TokenBucketState" - {
     "should truncate tokens to int correctly" in {
-      val state = TokenBucketState(tokens = 95.7, lastRefillMs = 0L, version = 1L)
+      val state =
+        TokenBucketState(tokens = 95.7, lastRefillMs = 0L, version = 1L)
       state.tokensInt shouldBe 95
     }
   }

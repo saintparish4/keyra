@@ -1,23 +1,23 @@
 package integration
 
+import java.time.Instant
+
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.freespec.AsyncFreeSpec
 import org.scalatest.matchers.should.Matchers
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
-import core.{StoredResponse, IdempotencyResult}
+import core.{IdempotencyResult, StoredResponse}
 import storage.DynamoDBIdempotencyStore
-
 import cats.effect.IO
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*
-import java.time.Instant
 
 /** Integration tests for DynamoDBIdempotencyStore.
   *
-  * Tests first-writer-wins semantics and response caching.
-  * Requires Docker. Without Docker, run unit tests only: sbt unitTest
+  * Tests first-writer-wins semantics and response caching. Requires Docker.
+  * Without Docker, run unit tests only: sbt unitTest
   */
 @Integration
 class DynamoDBIdempotencyStoreIntegrationSpec
@@ -29,8 +29,10 @@ class DynamoDBIdempotencyStoreIntegrationSpec
 
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger[IO]
 
-  lazy val store: DynamoDBIdempotencyStore[IO] =
-    new DynamoDBIdempotencyStore[IO](dynamoDbClient, testDynamoDBConfig.idempotencyTable)
+  lazy val store: DynamoDBIdempotencyStore[IO] = new DynamoDBIdempotencyStore[IO](
+    dynamoDbClient,
+    testDynamoDBConfig.idempotencyTable,
+  )
 
   override protected def beforeEach(): Unit = {
     super.beforeEach()
@@ -40,23 +42,25 @@ class DynamoDBIdempotencyStoreIntegrationSpec
   "DynamoDBIdempotencyStore" - {
 
     "should return New for first request" in
-      store.check("new-key-1", clientId = "client-1", ttlSeconds = 3600).asserting { result =>
-        result shouldBe a[IdempotencyResult.New]
-        result.asInstanceOf[IdempotencyResult.New].idempotencyKey shouldBe
-          "new-key-1"
-      }
+      store.check("new-key-1", clientId = "client-1", ttlSeconds = 3600)
+        .asserting { result =>
+          result shouldBe a[IdempotencyResult.New]
+          result.asInstanceOf[IdempotencyResult.New].idempotencyKey shouldBe
+            "new-key-1"
+        }
 
     "should return InProgress for second request with same key (before completion)" in {
       val test = for {
         first <- store.check("dup-key", clientId = "client-1", ttlSeconds = 3600)
-        second <- store.check("dup-key", clientId = "client-1", ttlSeconds = 3600)
+        second <- store
+          .check("dup-key", clientId = "client-1", ttlSeconds = 3600)
       } yield (first, second)
 
       test.asserting { case (first, second) =>
         first shouldBe a[IdempotencyResult.New]
         second shouldBe a[IdempotencyResult.InProgress]
-        second.asInstanceOf[IdempotencyResult.InProgress].idempotencyKey shouldBe
-          "dup-key"
+        second.asInstanceOf[IdempotencyResult.InProgress]
+          .idempotencyKey shouldBe "dup-key"
       }
     }
 
@@ -66,18 +70,20 @@ class DynamoDBIdempotencyStoreIntegrationSpec
         statusCode = 201,
         body = """{"id": "order-123", "status": "created"}""",
         headers = Map("X-Request-Id" -> "req-456"),
-        completedAt = now
+        completedAt = now,
       )
 
       val test = for {
         // First request - mark as new
-        _ <- store.check("response-key", clientId = "client-1", ttlSeconds = 3600)
+        _ <- store
+          .check("response-key", clientId = "client-1", ttlSeconds = 3600)
 
         // Store the response
         success <- store.storeResponse("response-key", storedResponse)
 
         // Second request - should get cached response
-        result <- store.check("response-key", clientId = "client-1", ttlSeconds = 3600)
+        result <- store
+          .check("response-key", clientId = "client-1", ttlSeconds = 3600)
       } yield (success, result)
 
       test.asserting { case (success, result) =>
@@ -98,11 +104,16 @@ class DynamoDBIdempotencyStoreIntegrationSpec
 
       val test = for {
         results <- (1 to concurrentRequests).toList.parTraverse(_ =>
-          store.check("concurrent-idem-key", clientId = "client-1", ttlSeconds = 3600),
+          store.check(
+            "concurrent-idem-key",
+            clientId = "client-1",
+            ttlSeconds = 3600,
+          ),
         )
 
         newCount = results.count(_.isInstanceOf[IdempotencyResult.New])
-        inProgressCount = results.count(_.isInstanceOf[IdempotencyResult.InProgress])
+        inProgressCount = results
+          .count(_.isInstanceOf[IdempotencyResult.InProgress])
       } yield (newCount, inProgressCount)
 
       test.asserting { case (newCount, inProgressCount) =>
@@ -150,13 +161,14 @@ class DynamoDBIdempotencyStoreIntegrationSpec
         }""",
         headers =
           Map("Content-Type" -> "application/json", "X-Trace-Id" -> "trace-789"),
-        completedAt = now
+        completedAt = now,
       )
 
       val test = for {
         _ <- store.check("complex-key", clientId = "client-1", ttlSeconds = 3600)
         _ <- store.storeResponse("complex-key", complexResponse)
-        result <- store.check("complex-key", clientId = "client-1", ttlSeconds = 3600)
+        result <- store
+          .check("complex-key", clientId = "client-1", ttlSeconds = 3600)
       } yield result
 
       test.asserting { result =>
@@ -173,13 +185,15 @@ class DynamoDBIdempotencyStoreIntegrationSpec
     "should allow retry after marking as failed" in {
       val test = for {
         // First request
-        first <- store.check("retry-key", clientId = "client-1", ttlSeconds = 3600)
-        
+        first <- store
+          .check("retry-key", clientId = "client-1", ttlSeconds = 3600)
+
         // Mark as failed
         marked <- store.markFailed("retry-key")
-        
+
         // Should be able to retry
-        retry <- store.check("retry-key", clientId = "client-1", ttlSeconds = 3600)
+        retry <- store
+          .check("retry-key", clientId = "client-1", ttlSeconds = 3600)
       } yield (first, marked, retry)
 
       test.asserting { case (first, marked, retry) =>

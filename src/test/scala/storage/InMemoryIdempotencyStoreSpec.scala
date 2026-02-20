@@ -1,14 +1,14 @@
 package storage
 
+import java.time.Instant
+
 import org.scalatest.freespec.AsyncFreeSpec
 import org.scalatest.matchers.should.Matchers
 
-import core.{StoredResponse, IdempotencyResult}
-
+import core.{IdempotencyResult, StoredResponse}
 import cats.effect.IO
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*
-import java.time.Instant
 
 class InMemoryIdempotencyStoreSpec
     extends AsyncFreeSpec with AsyncIOSpec with Matchers:
@@ -18,7 +18,8 @@ class InMemoryIdempotencyStoreSpec
     "should return New for first request" in {
       val test = for {
         store <- InMemoryIdempotencyStore.create[IO]
-        result <- store.check("new-key", clientId = "client-1", ttlSeconds = 3600)
+        result <- store
+          .check("new-key", clientId = "client-1", ttlSeconds = 3600)
       } yield result
 
       test.asserting { result =>
@@ -32,7 +33,8 @@ class InMemoryIdempotencyStoreSpec
       val test = for {
         store <- InMemoryIdempotencyStore.create[IO]
         _ <- store.check("dup-key", clientId = "client-1", ttlSeconds = 3600)
-        result <- store.check("dup-key", clientId = "client-1", ttlSeconds = 3600)
+        result <- store
+          .check("dup-key", clientId = "client-1", ttlSeconds = 3600)
       } yield result
 
       test.asserting(result => result shouldBe a[IdempotencyResult.InProgress])
@@ -42,23 +44,29 @@ class InMemoryIdempotencyStoreSpec
       val test = for {
         store <- InMemoryIdempotencyStore.create[IO]
         _ <- store.check("pending-key", clientId = "client-1", ttlSeconds = 3600)
-        result <- store.check("pending-key", clientId = "client-1", ttlSeconds = 3600)
+        result <- store
+          .check("pending-key", clientId = "client-1", ttlSeconds = 3600)
       } yield result
 
-      test.asserting { result =>
-        result shouldBe a[IdempotencyResult.InProgress]
-      }
+      test.asserting(result => result shouldBe a[IdempotencyResult.InProgress])
     }
 
     "should store and return cached response" in {
       val now = Instant.now()
-      val response = StoredResponse(201, """{"id": 1}""", Map("X-Id" -> "abc"), completedAt = now)
+      val response = StoredResponse(
+        201,
+        """{"id": 1}""",
+        Map("X-Id" -> "abc"),
+        completedAt = now,
+      )
 
       val test = for {
         store <- InMemoryIdempotencyStore.create[IO]
-        _ <- store.check("response-key", clientId = "client-1", ttlSeconds = 3600)
+        _ <- store
+          .check("response-key", clientId = "client-1", ttlSeconds = 3600)
         success <- store.storeResponse("response-key", response)
-        result <- store.check("response-key", clientId = "client-1", ttlSeconds = 3600)
+        result <- store
+          .check("response-key", clientId = "client-1", ttlSeconds = 3600)
       } yield (success, result)
 
       test.asserting { case (success, result) =>
@@ -91,7 +99,8 @@ class InMemoryIdempotencyStoreSpec
           store.check("concurrent-key", clientId = "client-1", ttlSeconds = 3600),
         )
         newCount = results.count(_.isInstanceOf[IdempotencyResult.New])
-        inProgressCount = results.count(_.isInstanceOf[IdempotencyResult.InProgress])
+        inProgressCount = results
+          .count(_.isInstanceOf[IdempotencyResult.InProgress])
       } yield (newCount, inProgressCount)
 
       test.asserting { case (newCount, inProgressCount) =>
@@ -104,9 +113,11 @@ class InMemoryIdempotencyStoreSpec
     "should allow retry after marking as failed" in {
       val test = for {
         store <- InMemoryIdempotencyStore.create[IO]
-        first <- store.check("retry-key", clientId = "client-1", ttlSeconds = 3600)
+        first <- store
+          .check("retry-key", clientId = "client-1", ttlSeconds = 3600)
         marked <- store.markFailed("retry-key")
-        retry <- store.check("retry-key", clientId = "client-1", ttlSeconds = 3600)
+        retry <- store
+          .check("retry-key", clientId = "client-1", ttlSeconds = 3600)
       } yield (first, marked, retry)
 
       test.asserting { case (first, marked, retry) =>

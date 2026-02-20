@@ -16,8 +16,8 @@ import cats.syntax.all.*
 /** Integration tests for DynamoDBRateLimitStore.
   *
   * These tests run against a real DynamoDB instance in LocalStack to verify
-  * correct behavior including atomic operations.
-  * Requires Docker. Without Docker, run unit tests only: sbt unitTest
+  * correct behavior including atomic operations. Requires Docker. Without
+  * Docker, run unit tests only: sbt unitTest
   */
 @Integration
 class DynamoDBRateLimitStoreIntegrationSpec
@@ -31,8 +31,11 @@ class DynamoDBRateLimitStoreIntegrationSpec
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger[IO]
 
   // Test profile - use minimal refill rate to avoid refill during test execution
-  val testProfile: RateLimitProfile =
-    RateLimitProfile(capacity = 10, refillRatePerSecond = 0.00001, ttlSeconds = 3600)
+  val testProfile: RateLimitProfile = RateLimitProfile(
+    capacity = 10,
+    refillRatePerSecond = 0.00001,
+    ttlSeconds = 3600,
+  )
 
   // Create store instance
   lazy val store: DynamoDBRateLimitStore[IO] = new DynamoDBRateLimitStore[IO](

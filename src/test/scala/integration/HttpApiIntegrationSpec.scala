@@ -4,31 +4,34 @@ import org.http4s.*
 import org.http4s.circe.*
 import org.http4s.headers.`Retry-After`
 import org.http4s.implicits.*
-import org.typelevel.ci.*
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.freespec.AsyncFreeSpec
 import org.scalatest.matchers.should.Matchers
+import org.typelevel.ci.*
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
-import api.{DashboardApi, Routes, RateLimitCheckResponse, RateLimitStatusResponse}
+import api.{
+  DashboardApi, RateLimitCheckResponse, RateLimitStatusResponse, Routes,
+}
 import config.{IdempotencyConfig, RateLimitConfig}
 import events.EventPublisher
 import _root_.metrics.MetricsPublisher
-import security.{ApiKeyAuth, ApiKeyStore, AuthenticatedClient, ClientTier, Permission}
+import security.{
+  ApiKeyAuth, ApiKeyStore, AuthenticatedClient, ClientTier, Permission,
+}
 import storage.{DynamoDBIdempotencyStore, DynamoDBRateLimitStore}
-
 import cats.effect.IO
-import cats.effect.unsafe.implicits.global
 import cats.effect.testing.scalatest.AsyncIOSpec
+import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import io.circe.generic.auto.*
 import io.circe.parser.*
 
 /** Integration tests for HTTP API endpoints.
   *
-  * Tests the full request/response cycle through the HTTP layer.
-  * Requires Docker (LocalStack). Without Docker, run unit tests only: sbt unitTest
+  * Tests the full request/response cycle through the HTTP layer. Requires
+  * Docker (LocalStack). Without Docker, run unit tests only: sbt unitTest
   */
 @Integration
 class HttpApiIntegrationSpec
@@ -57,7 +60,10 @@ class HttpApiIntegrationSpec
     )
 
   lazy val idempotencyStore: DynamoDBIdempotencyStore[IO] =
-    new DynamoDBIdempotencyStore[IO](dynamoDbClient, testDynamoDBConfig.idempotencyTable)
+    new DynamoDBIdempotencyStore[IO](
+      dynamoDbClient,
+      testDynamoDBConfig.idempotencyTable,
+    )
 
   // No-op event publisher for tests
   lazy val eventPublisher: EventPublisher[IO] = EventPublisher.noop[IO]
@@ -66,30 +72,26 @@ class HttpApiIntegrationSpec
   lazy val metricsPublisher: MetricsPublisher[IO] = MetricsPublisher.noop[IO]
 
   // Test API key store
-  lazy val testApiKeyStore: ApiKeyStore[IO] = ApiKeyStore.inMemory[IO](
-    Map(
-      "test-key" -> AuthenticatedClient(
-        apiKeyId = "test-client-1",
-        clientId = "test-client-1",
-        clientName = "Test Client",
-        tier = ClientTier.Free, // Use Free tier (capacity 10) to match test expectations
-        permissions = Permission.standard
-      )
-    )
-  )
+  lazy val testApiKeyStore: ApiKeyStore[IO] = ApiKeyStore.inMemory[IO](Map(
+    "test-key" -> AuthenticatedClient(
+      apiKeyId = "test-client-1",
+      clientId = "test-client-1",
+      clientName = "Test Client",
+      tier = ClientTier.Free, // Use Free tier (capacity 10) to match test expectations
+      permissions = Permission.standard,
+    ),
+  ))
 
   // Auth middleware
   lazy val authMiddleware = ApiKeyAuth.middleware[IO](testApiKeyStore, None)
 
   // Dashboard API (no SSE queue for integration tests)
-  lazy val dashboardApi: DashboardApi[IO] =
-    DashboardApi.apply[IO](rateLimitStore, testRateLimitConfig, logger, None, eventPublisher)
-      .unsafeRunSync()
+  lazy val dashboardApi: DashboardApi[IO] = DashboardApi
+    .apply[IO](rateLimitStore, testRateLimitConfig, logger, None, eventPublisher)
+    .unsafeRunSync()
 
-  lazy val testIdempotencyConfig: IdempotencyConfig = IdempotencyConfig(
-    defaultTtlSeconds = 86400,
-    maxTtlSeconds = 86400,
-  )
+  lazy val testIdempotencyConfig: IdempotencyConfig =
+    IdempotencyConfig(defaultTtlSeconds = 86400, maxTtlSeconds = 86400)
 
   // Create routes
   lazy val routes: Routes[IO] = new Routes[IO](
@@ -146,10 +148,9 @@ class HttpApiIntegrationSpec
     "POST /v1/ratelimit/check should allow requests within capacity" in {
       val body = """{"key": "user:123", "cost": 1}"""
       val request = Request[IO](Method.POST, uri"/v1/ratelimit/check")
-        .withEntity(body)
-        .putHeaders(
+        .withEntity(body).putHeaders(
           headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
+          headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
         )
 
       for {
@@ -167,18 +168,16 @@ class HttpApiIntegrationSpec
       // Exhaust all capacity in a single request to avoid token refill between requests
       val exhaustBody = """{"key": "exhaust-key", "cost": 10}"""
       val exhaustRequest = Request[IO](Method.POST, uri"/v1/ratelimit/check")
-        .withEntity(exhaustBody)
-        .putHeaders(
+        .withEntity(exhaustBody).putHeaders(
           headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
+          headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
         )
 
       val nextBody = """{"key": "exhaust-key", "cost": 1}"""
       val nextRequest = Request[IO](Method.POST, uri"/v1/ratelimit/check")
-        .withEntity(nextBody)
-        .putHeaders(
+        .withEntity(nextBody).putHeaders(
           headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
+          headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
         )
 
       val test = for {
@@ -199,16 +198,14 @@ class HttpApiIntegrationSpec
       val body = """{"key": "retry-test-key", "cost": 10}"""
 
       val request1 = Request[IO](Method.POST, uri"/v1/ratelimit/check")
-        .withEntity(body)
-        .putHeaders(
+        .withEntity(body).putHeaders(
           headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
+          headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
         )
       val request2 = Request[IO](Method.POST, uri"/v1/ratelimit/check")
-        .withEntity("""{"key": "retry-test-key", "cost": 1}""")
-        .putHeaders(
+        .withEntity("""{"key": "retry-test-key", "cost": 1}""").putHeaders(
           headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
+          headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
         )
 
       val test = for {
@@ -231,10 +228,9 @@ class HttpApiIntegrationSpec
       // First consume some tokens
       val checkBody = """{"key": "status-key", "cost": 3}"""
       val checkRequest = Request[IO](Method.POST, uri"/v1/ratelimit/check")
-        .withEntity(checkBody)
-        .putHeaders(
+        .withEntity(checkBody).putHeaders(
           headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
+          headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
         )
 
       val test = for {
@@ -242,7 +238,9 @@ class HttpApiIntegrationSpec
 
         statusRequest =
           Request[IO](Method.GET, uri"/v1/ratelimit/status/status-key")
-            .putHeaders(headers.Authorization(Credentials.Token(ci"Bearer", "test-key")))
+            .putHeaders(headers.Authorization(
+              Credentials.Token(ci"Bearer", "test-key"),
+            ))
         response <- httpApp.run(statusRequest)
         body <- response.as[String]
         json <- IO.fromEither(parse(body))
@@ -259,7 +257,9 @@ class HttpApiIntegrationSpec
     "GET /v1/ratelimit/status/:key should return full capacity for unknown key" in {
       val request =
         Request[IO](Method.GET, uri"/v1/ratelimit/status/unknown-key")
-          .putHeaders(headers.Authorization(Credentials.Token(ci"Bearer", "test-key")))
+          .putHeaders(headers.Authorization(
+            Credentials.Token(ci"Bearer", "test-key"),
+          ))
 
       for {
         response <- httpApp.run(request)
@@ -277,10 +277,9 @@ class HttpApiIntegrationSpec
     "POST /v1/idempotency/check should return 'new' for first request" in {
       val body = """{"idempotencyKey": "payment:abc-123"}"""
       val request = Request[IO](Method.POST, uri"/v1/idempotency/check")
-        .withEntity(body)
-        .putHeaders(
+        .withEntity(body).putHeaders(
           headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
+          headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
         )
 
       for {
@@ -298,10 +297,9 @@ class HttpApiIntegrationSpec
     "POST /v1/idempotency/check should return 'in_progress' for second request" in {
       val body = """{"idempotencyKey": "payment:dup-456"}"""
       val request = Request[IO](Method.POST, uri"/v1/idempotency/check")
-        .withEntity(body)
-        .putHeaders(
+        .withEntity(body).putHeaders(
           headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
+          headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
         )
 
       val test = for {
@@ -327,17 +325,16 @@ class HttpApiIntegrationSpec
       }"""
 
       val checkRequest = Request[IO](Method.POST, uri"/v1/idempotency/check")
-        .withEntity(checkBody)
-        .putHeaders(
+        .withEntity(checkBody).putHeaders(
           headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
+          headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
         )
-      val storeRequest = Request[IO](Method.POST, uri"/v1/idempotency/store-test-key/complete")
-        .withEntity(storeBody)
-        .putHeaders(
-          headers.`Content-Type`(MediaType.application.json),
-          headers.Authorization(Credentials.Token(ci"Bearer", "test-key"))
-        )
+      val storeRequest =
+        Request[IO](Method.POST, uri"/v1/idempotency/store-test-key/complete")
+          .withEntity(storeBody).putHeaders(
+            headers.`Content-Type`(MediaType.application.json),
+            headers.Authorization(Credentials.Token(ci"Bearer", "test-key")),
+          )
 
       val test = for {
         // Create idempotency key

@@ -15,9 +15,10 @@ import cats.syntax.all.*
 /** Integration tests for LeakyBucketRateLimitStore.
   *
   * These tests run against a real DynamoDB instance in LocalStack to verify
-  * leaky bucket behavior: level-based state, allow when level + cost <= capacity,
-  * reject with retryAfter when over capacity, and OCC under concurrency.
-  * Requires Docker. Without Docker, run unit tests only: sbt unitTest
+  * leaky bucket behavior: level-based state, allow when level + cost <=
+  * capacity, reject with retryAfter when over capacity, and OCC under
+  * concurrency. Requires Docker. Without Docker, run unit tests only: sbt
+  * unitTest
   */
 @Integration
 class LeakyBucketRateLimitStoreIntegrationSpec
@@ -30,8 +31,11 @@ class LeakyBucketRateLimitStoreIntegrationSpec
   implicit val logger: Logger[IO] = Slf4jLogger.getLogger[IO]
 
   // Same schema as token bucket; minimal leak rate so behavior is deterministic in short tests
-  val testProfile: RateLimitProfile =
-    RateLimitProfile(capacity = 10, refillRatePerSecond = 0.00001, ttlSeconds = 3600)
+  val testProfile: RateLimitProfile = RateLimitProfile(
+    capacity = 10,
+    refillRatePerSecond = 0.00001,
+    ttlSeconds = 3600,
+  )
 
   lazy val store: LeakyBucketRateLimitStore[IO] = LeakyBucketRateLimitStore[IO](
     dynamoDbClient,
@@ -46,12 +50,12 @@ class LeakyBucketRateLimitStoreIntegrationSpec
   "LeakyBucketRateLimitStore" - {
 
     "should allow requests within capacity" in
-      store.checkAndConsume("leaky-test-key-1", cost = 1, testProfile)
-        .asserting { decision =>
+      store.checkAndConsume("leaky-test-key-1", cost = 1, testProfile).asserting {
+        decision =>
           decision shouldBe a[RateLimitDecision.Allowed]
           decision.asInstanceOf[RateLimitDecision.Allowed]
             .tokensRemaining shouldBe 9
-        }
+      }
 
     "should persist state across requests" in {
       val test = for {
@@ -70,7 +74,8 @@ class LeakyBucketRateLimitStoreIntegrationSpec
     "should reject when capacity exhausted (no burst beyond capacity)" in {
       val test = for {
         _ <- store.checkAndConsume("leaky-exhaust-key", cost = 10, testProfile)
-        decision <- store.checkAndConsume("leaky-exhaust-key", cost = 1, testProfile)
+        decision <- store
+          .checkAndConsume("leaky-exhaust-key", cost = 1, testProfile)
       } yield decision
 
       test.asserting { decision =>
@@ -84,7 +89,11 @@ class LeakyBucketRateLimitStoreIntegrationSpec
       val minimalLeakProfile = testProfile.copy(refillRatePerSecond = 0.00001)
       val test = for {
         decisions <- (1 to 20).toList.parTraverse(_ =>
-          store.checkAndConsume("leaky-concurrent-key", cost = 1, minimalLeakProfile),
+          store.checkAndConsume(
+            "leaky-concurrent-key",
+            cost = 1,
+            minimalLeakProfile,
+          ),
         )
         allowed = decisions.count(_.allowed)
         rejected = decisions.count(!_.allowed)
@@ -99,14 +108,17 @@ class LeakyBucketRateLimitStoreIntegrationSpec
     "should isolate different keys" in {
       val test = for {
         _ <- store.checkAndConsume("leaky-isolated-1", cost = 10, testProfile)
-        rejected <- store.checkAndConsume("leaky-isolated-1", cost = 1, testProfile)
-        allowed <- store.checkAndConsume("leaky-isolated-2", cost = 1, testProfile)
+        rejected <- store
+          .checkAndConsume("leaky-isolated-1", cost = 1, testProfile)
+        allowed <- store
+          .checkAndConsume("leaky-isolated-2", cost = 1, testProfile)
       } yield (rejected, allowed)
 
       test.asserting { case (rejected, allowed) =>
         rejected.allowed shouldBe false
         allowed.allowed shouldBe true
-        allowed.asInstanceOf[RateLimitDecision.Allowed].tokensRemaining shouldBe 9
+        allowed.asInstanceOf[RateLimitDecision.Allowed].tokensRemaining shouldBe
+          9
       }
     }
 
@@ -132,9 +144,12 @@ class LeakyBucketRateLimitStoreIntegrationSpec
     "should handle high cost requests" in {
       val highCostProfile = testProfile.copy(capacity = 100)
       val test = for {
-        d1 <- store.checkAndConsume("leaky-high-cost-key", cost = 50, highCostProfile)
-        d2 <- store.checkAndConsume("leaky-high-cost-key", cost = 50, highCostProfile)
-        d3 <- store.checkAndConsume("leaky-high-cost-key", cost = 1, highCostProfile)
+        d1 <- store
+          .checkAndConsume("leaky-high-cost-key", cost = 50, highCostProfile)
+        d2 <- store
+          .checkAndConsume("leaky-high-cost-key", cost = 50, highCostProfile)
+        d3 <- store
+          .checkAndConsume("leaky-high-cost-key", cost = 1, highCostProfile)
       } yield (d1, d2, d3)
 
       test.asserting { case (d1, d2, d3) =>
