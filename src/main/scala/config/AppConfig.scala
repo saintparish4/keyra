@@ -147,6 +147,17 @@ case class ResilienceConfig(
     retry: RetrySettings = RetrySettings(),
     bulkhead: BulkheadSettings = BulkheadSettings(),
     timeout: TimeoutSettings = TimeoutSettings(),
+    degradationMode: String = "reject-all",
+) derives ConfigReader:
+  import resilience.GracefulDegradation.DegradationMode
+  def parsedDegradationMode: DegradationMode = degradationMode match
+    case "allow-all" => DegradationMode.AllowAll
+    case "reject-all" => DegradationMode.RejectAll
+    case "use-cached" => DegradationMode.UseCached
+    case _ => DegradationMode.RejectAll
+
+case class StorageConfig(
+    backend: String = "dynamodb", // "in-memory" | "dynamodb"
 ) derives ConfigReader
 
 // Root application configuration
@@ -162,6 +173,8 @@ case class AppConfig(
       authentication = AuthenticationConfig(),
       secrets = SecretsConfig(),
     ),
+    resilience: ResilienceConfig = ResilienceConfig(),
+    storage: StorageConfig = StorageConfig(),
 ) derives ConfigReader
 
 object AppConfig:

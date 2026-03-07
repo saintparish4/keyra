@@ -6,12 +6,15 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.jdk.FutureConverters.*
 
+import org.typelevel.log4cats.Logger
+
 import cats.effect.*
 import cats.syntax.all.*
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.*
 import core.{RateLimitDecision, RateLimitProfile, RateLimitStore}
 import DynamoDBOps.*
+import _root_.metrics.MetricsPublisher
 
 /** DynamoDB implementation of RateLimitStore using leaky bucket algorithm.
   *
@@ -28,6 +31,8 @@ import DynamoDBOps.*
 class LeakyBucketRateLimitStore[F[_]: Async](
     client: DynamoDbAsyncClient,
     tableName: String,
+    logger: Logger[F],
+    metrics: MetricsPublisher[F],
 ) extends RateLimitStore[F]:
 
   private val MaxRetries = 10
@@ -56,35 +61,39 @@ class LeakyBucketRateLimitStore[F[_]: Async](
           val updatedLevel = newLevel + cost
           val newState =
             LeakyBucketState(updatedLevel, now, currentState.version + 1)
-          attemptUpdate(key, currentState.version, newState, profile.ttlSeconds)
-            .flatMap {
-              case true =>
-                val resetAt = Instant.ofEpochMilli(
-                  now + (updatedLevel / profile.refillRatePerSecond * 1000)
-                    .toLong,
+          attemptUpdate(
+            key,
+            currentState.version,
+            newState,
+            profile.ttlSeconds,
+            now,
+          ).flatMap {
+            case true =>
+              val resetAt = Instant.ofEpochMilli(
+                now + (updatedLevel / profile.refillRatePerSecond * 1000).toLong,
+              )
+              Async[F].pure(
+                RateLimitDecision
+                  .Allowed((profile.capacity - updatedLevel).toInt, resetAt),
+              )
+            case false =>
+              if retriesRemaining > 0 then
+                Async[F].sleep(1.millis) *> checkAndConsumeWithRetry(
+                  key,
+                  cost,
+                  profile,
+                  retriesRemaining - 1,
                 )
+              else
+                val secToAllow = (newLevel + cost - profile.capacity) /
+                  profile.refillRatePerSecond
+                val resetAt = Instant
+                  .ofEpochMilli(now + (secToAllow * 1000).toLong)
                 Async[F].pure(
                   RateLimitDecision
-                    .Allowed((profile.capacity - updatedLevel).toInt, resetAt),
+                    .Rejected(secToAllow.ceil.toInt.max(1), resetAt),
                 )
-              case false =>
-                if retriesRemaining > 0 then
-                  Async[F].sleep(1.millis) *> checkAndConsumeWithRetry(
-                    key,
-                    cost,
-                    profile,
-                    retriesRemaining - 1,
-                  )
-                else
-                  val secToAllow = (newLevel + cost - profile.capacity) /
-                    profile.refillRatePerSecond
-                  val resetAt = Instant
-                    .ofEpochMilli(now + (secToAllow * 1000).toLong)
-                  Async[F].pure(
-                    RateLimitDecision
-                      .Rejected(secToAllow.ceil.toInt.max(1), resetAt),
-                  )
-            }
+          }
         else
           val secToAllow =
             (newLevel + cost - profile.capacity) / profile.refillRatePerSecond
@@ -101,33 +110,41 @@ class LeakyBucketRateLimitStore[F[_]: Async](
     for
       now <- Clock[F].realTime.map(_.toMillis)
       maybeState <- getState(key)
-      result = maybeState.map { state =>
-        val elapsedSec = (now - state.lastLeakMs) / 1000.0
-        val leakAmount = elapsedSec * profile.refillRatePerSecond
-        val newLevel = math.max(0.0, state.level - leakAmount)
-        val remaining = (profile.capacity - newLevel).toInt
-        val resetAt = Instant.ofEpochMilli(
-          now + (newLevel / profile.refillRatePerSecond * 1000).toLong,
-        )
-        RateLimitDecision.Allowed(remaining, resetAt)
-      }
+      result <- maybeState match
+        case Some(Right(state)) =>
+          val elapsedSec = (now - state.lastLeakMs) / 1000.0
+          val leakAmount = elapsedSec * profile.refillRatePerSecond
+          val newLevel = math.max(0.0, state.level - leakAmount)
+          val remaining = (profile.capacity - newLevel).toInt
+          val resetAt = Instant.ofEpochMilli(
+            now + (newLevel / profile.refillRatePerSecond * 1000).toLong,
+          )
+          Async[F].pure(Some(RateLimitDecision.Allowed(remaining, resetAt)))
+        case Some(Left(err)) => logger.error(
+            s"Corrupt rate-limit state for key=$key: $err — returning no status",
+          ) *> metrics.increment("CorruptStateRead").as(None)
+        case None => Async[F].pure(None)
     yield result
 
-  override def healthCheck: F[Either[String, Unit]] = Async[F]
-    .fromCompletableFuture(Async[F].delay(
-      client
-        .describeTable(DescribeTableRequest.builder().tableName(tableName).build())
-        .toCompletableFuture,
-    )).map(_ => Right(())).handleError(e => Left(e.getMessage))
+  override def healthCheck: F[Either[String, Unit]] =
+    dynamoHealthCheck(client, tableName)
 
   private def getOrInitState(
       key: String,
       profile: RateLimitProfile,
       now: Long,
-  ): F[LeakyBucketState] = getState(key)
-    .map(_.getOrElse(LeakyBucketState(0.0, now, 0L)))
+  ): F[LeakyBucketState] = getState(key).flatMap {
+    case Some(Right(state)) => Async[F].pure(state)
+    case Some(Left(err)) => logger
+        .error(s"Corrupt rate-limit state for key $key: $err — failing open") *>
+        metrics.increment("CorruptStateRead") *>
+        Async[F].pure(LeakyBucketState(0.0, now, 0L))
+    case None => Async[F].pure(LeakyBucketState(0.0, now, 0L))
+  }
 
-  private def getState(key: String): F[Option[LeakyBucketState]] =
+  private def getState(
+      key: String,
+  ): F[Option[Either[String, LeakyBucketState]]] =
     val request = GetItemRequest.builder().tableName(tableName)
       .key(Map("pk" -> attr(s"ratelimit#$key")).asJava).consistentRead(true)
       .build()
@@ -139,20 +156,33 @@ class LeakyBucketRateLimitStore[F[_]: Async](
       else None,
     )
 
-  private def parseState(item: Map[String, AttributeValue]): LeakyBucketState =
-    LeakyBucketState(
-      level = item.get("tokens").map(_.n().toDouble).getOrElse(0.0),
-      lastLeakMs = item.get("lastRefillMs").map(_.n().toLong).getOrElse(0L),
-      version = item.get("version").map(_.n().toLong).getOrElse(0L),
-    )
+  private def parseState(
+      item: Map[String, AttributeValue],
+  ): Either[String, LeakyBucketState] =
+    try
+      val level = item.get("tokens").toRight("missing 'tokens' attribute")
+        .map(_.n().toDouble)
+      val lastLeakMs = item.get("lastRefillMs")
+        .toRight("missing 'lastRefillMs' attribute").map(_.n().toLong)
+      val version = item.get("version").toRight("missing 'version' attribute")
+        .map(_.n().toLong)
+      for
+        l <- level
+        lm <- lastLeakMs
+        v <- version
+      yield LeakyBucketState(l, lm, v)
+    catch
+      case e: NumberFormatException =>
+        Left(s"malformed numeric attribute: ${e.getMessage}")
 
   private def attemptUpdate(
       key: String,
       expectedVersion: Long,
       newState: LeakyBucketState,
       ttlSeconds: Long,
+      now: Long,
   ): F[Boolean] =
-    val ttl = System.currentTimeMillis() / 1000 + ttlSeconds
+    val ttl = now / 1000 + ttlSeconds
 
     val item = Map(
       "pk" -> attr(s"ratelimit#$key"),
@@ -185,5 +215,7 @@ object LeakyBucketRateLimitStore:
   def apply[F[_]: Async](
       client: DynamoDbAsyncClient,
       tableName: String,
+      logger: Logger[F],
+      metrics: MetricsPublisher[F],
   ): LeakyBucketRateLimitStore[F] =
-    new LeakyBucketRateLimitStore[F](client, tableName)
+    new LeakyBucketRateLimitStore[F](client, tableName, logger, metrics)

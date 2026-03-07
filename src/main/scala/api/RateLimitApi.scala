@@ -113,20 +113,21 @@ class RateLimitApi[F[_]: Async](
           )
     yield response
 
-  // config.profiles is Map[String, RateLimitProfileConfig] built once at startup,
-  // so the .get lookup here is O(1) amortized regardless of profile count.
+  // Explicit profile name wins, then tier-named profile from config, then
+  // config defaults. No hardcoded values that can drift from application.conf
   private def getProfile(
       tier: ClientTier,
       profileName: Option[String],
-  ): RateLimitProfile = profileName.flatMap(config.profiles.get)
-    .map(p => RateLimitProfile(p.capacity, p.refillRatePerSecond, p.ttlSeconds))
-    .getOrElse(
-      tier match
-        case ClientTier.Free => RateLimitProfile(10, 1.0, 3600)
-        case ClientTier.Basic => RateLimitProfile(100, 10.0, 3600)
-        case ClientTier.Premium => RateLimitProfile(1000, 100.0, 3600)
-        case ClientTier.Enterprise => RateLimitProfile(10000, 1000.0, 3600),
-    )
+  ): RateLimitProfile =
+    val fromExplicitName = profileName.flatMap(config.profiles.get)
+    val fromTierName = config.profiles.get(tier.toString.toLowerCase)
+    fromExplicitName.orElse(fromTierName)
+      .map(p => RateLimitProfile(p.capacity, p.refillRatePerSecond, p.ttlSeconds))
+      .getOrElse(RateLimitProfile(
+        config.defaultCapacity,
+        config.defaultRefillRatePerSecond,
+        config.defaultTtlSeconds,
+      ))
 
   private def buildCheckResponse(
       decision: RateLimitDecision,
@@ -141,7 +142,11 @@ class RateLimitApi[F[_]: Async](
           resetAt = resetAt.toString,
           message = None,
         ).asJson,
-      )
+      ).map(_.putHeaders(
+        Header.Raw(ci"X-RateLimit-Limit", profile.capacity.toString),
+        Header.Raw(ci"X-RateLimit-Remaining", tokensRemaining.toString),
+        Header.Raw(ci"X-RateLimit-Reset", resetAt.getEpochSecond.toString),
+      ))
 
     case RateLimitDecision.Rejected(retryAfter, resetAt) => TooManyRequests(
         RateLimitCheckResponse(
@@ -181,7 +186,7 @@ class RateLimitApi[F[_]: Async](
           tier = client.tier.toString,
         )
 
-    eventPublisher.publish(event).handleError(error =>
+    eventPublisher.publish(event).handleErrorWith(error =>
       logger.warn(s"Failed to publish rate limit event: ${error.getMessage}"),
     )
 

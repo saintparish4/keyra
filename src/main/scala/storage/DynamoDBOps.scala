@@ -1,5 +1,6 @@
 package storage
 
+import scala.concurrent.duration.*
 import scala.jdk.FutureConverters.*
 
 import cats.effect.Async
@@ -42,3 +43,34 @@ object DynamoDBOps:
   ): F[Boolean] = Async[F].fromCompletableFuture(
     Async[F].delay(client.updateItem(request).toCompletableFuture),
   ).map(_ => true).recover { case _: ConditionalCheckFailedException => false }
+
+  /** OCC retry loop: run `attempt`, on false retry after `delay` up to
+    * `maxRetries` times. Returns the final result of `onSuccess` or
+    * `onExhaustion`.
+    */
+  def retryOnConditionFail[F[_]: Async, A](
+      attempt: F[Boolean],
+      maxRetries: Int,
+      delay: FiniteDuration = 1.millis,
+  )(onSuccess: F[A])(onExhaustion: F[A])(
+      onRetry: Option[F[Unit]] = None,
+  ): F[A] =
+    val retryAction = onRetry.getOrElse(Async[F].unit)
+    def loop(remaining: Int): F[A] = attempt.flatMap {
+      case true => onSuccess
+      case false =>
+        if remaining > 0 then
+          retryAction *> Async[F].sleep(delay) *> loop(remaining - 1)
+        else onExhaustion
+    }
+    loop(maxRetries)
+
+  /** Standard DynamoDB table health check via describeTable. */
+  def dynamoHealthCheck[F[_]: Async](
+      client: DynamoDbAsyncClient,
+      tableName: String,
+  ): F[Either[String, Unit]] = Async[F].fromCompletableFuture(Async[F].delay(
+    client
+      .describeTable(DescribeTableRequest.builder().tableName(tableName).build())
+      .toCompletableFuture,
+  )).map(_ => Right(())).handleError(e => Left(e.getMessage))

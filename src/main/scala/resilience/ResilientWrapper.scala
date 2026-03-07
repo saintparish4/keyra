@@ -125,22 +125,17 @@ object ResilientRateLimitStore:
         )
 
       private def applyPatterns[A](operation: F[A], name: String): F[A] =
-        // Start with the base operation
-        var wrappedOp = operation
-
-        // Apply timeout
-        wrappedOp = Temporal[F].timeout(wrappedOp, config.timeout.rateLimitCheck)
+        val withTimeout = Temporal[F]
+          .timeout(operation, config.timeout.rateLimitCheck)
           .adaptError { case _: java.util.concurrent.TimeoutException =>
             new RuntimeException(s"Operation $name timed out after ${config
                 .timeout.rateLimitCheck}")
           }
 
-        // Apply retry
-        wrappedOp = Retry.withPolicy(retryPolicy, name)(wrappedOp)
+        val withRetry = Retry.withPolicy(retryPolicy, name)(withTimeout)
 
-        // Apply circuit breaker
-        circuitBreaker.foreach { cb =>
-          wrappedOp = cb.protect(wrappedOp).flatTap(_ =>
+        val withCB = circuitBreaker.fold(withRetry)(cb =>
+          cb.protect(withRetry).flatTap(_ =>
             cb.metrics.flatMap(m =>
               metrics.recordCircuitBreakerState(
                 "dynamodb-ratelimit",
@@ -148,13 +143,10 @@ object ResilientRateLimitStore:
                 m.failureCount,
               ),
             ),
-          )
-        }
+          ),
+        )
 
-        // Apply bulkhead
-        bulkhead.foreach { bh => wrappedOp = bh.execute(wrappedOp) }
-
-        wrappedOp
+        bulkhead.fold(withCB)(_.execute(withCB))
 
       private def handleDegradation(
           key: String,

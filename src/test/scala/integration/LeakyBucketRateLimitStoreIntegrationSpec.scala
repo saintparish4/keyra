@@ -8,6 +8,7 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import core.{RateLimitDecision, RateLimitProfile}
 import storage.LeakyBucketRateLimitStore
+import metrics.MetricsPublisher
 import cats.effect.IO
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*
@@ -40,6 +41,8 @@ class LeakyBucketRateLimitStoreIntegrationSpec
   lazy val store: LeakyBucketRateLimitStore[IO] = LeakyBucketRateLimitStore[IO](
     dynamoDbClient,
     testDynamoDBConfig.rateLimitTable,
+    logger,
+    MetricsPublisher.noop[IO],
   )
 
   override protected def beforeEach(): Unit = {

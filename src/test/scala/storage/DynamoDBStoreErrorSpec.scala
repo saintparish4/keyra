@@ -22,6 +22,7 @@ import _root_.metrics.MetricsPublisher
 import resilience.*
 import security.{AuthenticatedClient, ClientTier, Permission}
 import api.IdempotencyApi
+import testutil.*
 import cats.effect.*
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*
@@ -50,17 +51,6 @@ class DynamoDBStoreErrorSpec
 
   given Logger[IO] = NoOpLogger[IO]
 
-  private val testProfile =
-    RateLimitProfile(capacity = 10, refillRatePerSecond = 1.0, ttlSeconds = 3600)
-
-  private val testClient = AuthenticatedClient(
-    apiKeyId = "test-client",
-    clientId = "test-client",
-    clientName = "Test",
-    tier = ClientTier.Free,
-    permissions = Permission.standard,
-  )
-
   /** ResilienceConfig tuned for fast unit tests: no retries, no circuit
     * breaker, no bulkhead, generous timeout so the failure is never a timeout.
     */
@@ -82,61 +72,6 @@ class DynamoDBStoreErrorSpec
     bulkhead = BulkheadSettings(enabled = false),
     timeout = TimeoutSettings(rateLimitCheck = 5.seconds),
   )
-
-  /** A MetricsPublisher that records increment calls so tests can assert on
-    * them.
-    */
-  private def capturingMetrics(
-      ref: Ref[IO, List[String]],
-  ): MetricsPublisher[IO] = new MetricsPublisher[IO]:
-    def increment(
-        name: String,
-        dims: Map[String, String] = Map.empty,
-    ): IO[Unit] = ref.update(_ :+ name)
-    def gauge(
-        name: String,
-        value: Double,
-        dims: Map[String, String] = Map.empty,
-    ): IO[Unit] = IO.unit
-    def recordLatency(
-        name: String,
-        latencyMs: Double,
-        dims: Map[String, String] = Map.empty,
-    ): IO[Unit] = IO.unit
-    def recordRateLimitDecision(
-        allowed: Boolean,
-        clientId: String,
-        tier: String = "unknown",
-    ): IO[Unit] = IO.unit
-    def recordCircuitBreakerState(
-        name: String,
-        state: String,
-        failures: Int,
-    ): IO[Unit] = IO.unit
-    def recordCacheMetrics(
-        cacheName: String,
-        hitRate: Double,
-        size: Long,
-    ): IO[Unit] = IO.unit
-    def recordDegradedOperation(operation: String): IO[Unit] = IO.unit
-    def timed[A](name: String, dims: Map[String, String] = Map.empty)(
-        fa: IO[A],
-    ): IO[A] = fa
-    def flush: IO[Unit] = IO.unit
-
-  /** A Logger that captures error messages for assertion. */
-  private def capturingLogger(ref: Ref[IO, List[String]]): Logger[IO] =
-    new Logger[IO]:
-      def error(t: Throwable)(msg: => String): IO[Unit] = ref.update(_ :+ msg)
-      def error(msg: => String): IO[Unit] = ref.update(_ :+ msg)
-      def warn(t: Throwable)(msg: => String): IO[Unit] = IO.unit
-      def warn(msg: => String): IO[Unit] = IO.unit
-      def info(t: Throwable)(msg: => String): IO[Unit] = IO.unit
-      def info(msg: => String): IO[Unit] = IO.unit
-      def debug(t: Throwable)(msg: => String): IO[Unit] = IO.unit
-      def debug(msg: => String): IO[Unit] = IO.unit
-      def trace(t: Throwable)(msg: => String): IO[Unit] = IO.unit
-      def trace(msg: => String): IO[Unit] = IO.unit
 
   /** Build a DynamoDbAsyncClient proxy that returns a fixed GetItemResponse.
     * putItem and updateItem return empty success responses. All other calls
@@ -183,20 +118,6 @@ class DynamoDBStoreErrorSpec
       "version" -> AttributeValue.builder().n("1").build(),
     ).asJava
     GetItemResponse.builder().item(item).build()
-
-  /** A rate-limit store that always raises the provided exception. */
-  private def failingStore(ex: Throwable): RateLimitStore[IO] =
-    new RateLimitStore[IO]:
-      def checkAndConsume(
-          key: String,
-          cost: Int,
-          profile: RateLimitProfile,
-      ): IO[RateLimitDecision] = IO.raiseError(ex)
-      def getStatus(
-          key: String,
-          profile: RateLimitProfile,
-      ): IO[Option[RateLimitDecision.Allowed]] = IO.raiseError(ex)
-      def healthCheck: IO[Either[String, Unit]] = IO.pure(Left(ex.getMessage))
 
   // ── 5.4a: ResilientRateLimitStore degradation ──────────────────────────────
 

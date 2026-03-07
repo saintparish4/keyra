@@ -77,29 +77,32 @@ class DynamoDBRateLimitStore[F[_]: Async](
       refilled = TokenBucket.refill(currentState, now, profile)
 
       decision <- TokenBucket.consume(refilled, cost, now) match
-        case Some(newState) =>
-          attemptUpdate(key, currentState.version, newState, profile.ttlSeconds)
-            .flatMap {
-              case true =>
-                val resetAt = TokenBucket.resetAt(now, newState.tokens, profile)
-                Async[F]
-                  .pure(RateLimitDecision.Allowed(newState.tokensInt, resetAt))
-              case false =>
-                // OCC conflict: retry with 1ms delay, max MaxRetries total; then reject (see class doc)
-                if retriesRemaining > 0 then
-                  metrics.increment("RateLimitOCCRetry") *>
-                    Async[F].sleep(1.millis) *> checkAndConsumeWithRetry(
-                      key,
-                      cost,
-                      profile,
-                      retriesRemaining - 1,
-                    )
-                else
-                  // High contention: reject after max retries to avoid over-issuing
-                  val resetAt = TokenBucket
-                    .resetAt(now, refilled.tokens, profile)
-                  Async[F].pure(RateLimitDecision.Rejected(1, resetAt))
-            }
+        case Some(newState) => attemptUpdate(
+            key,
+            currentState.version,
+            newState,
+            profile.ttlSeconds,
+            now,
+          ).flatMap {
+            case true =>
+              val resetAt = TokenBucket.resetAt(now, newState.tokens, profile)
+              Async[F]
+                .pure(RateLimitDecision.Allowed(newState.tokensInt, resetAt))
+            case false =>
+              // OCC conflict: retry with 1ms delay, max MaxRetries total; then reject (see class doc)
+              if retriesRemaining > 0 then
+                metrics.increment("RateLimitOCCRetry") *>
+                  Async[F].sleep(1.millis) *> checkAndConsumeWithRetry(
+                    key,
+                    cost,
+                    profile,
+                    retriesRemaining - 1,
+                  )
+              else
+                // High contention: reject after max retries to avoid over-issuing
+                val resetAt = TokenBucket.resetAt(now, refilled.tokens, profile)
+                Async[F].pure(RateLimitDecision.Rejected(1, resetAt))
+          }
         case None =>
           val retryAfter = TokenBucket
             .retryAfterSeconds(cost, refilled.tokens, profile)
@@ -126,12 +129,8 @@ class DynamoDBRateLimitStore[F[_]: Async](
         case None => Async[F].pure(None)
     yield result
 
-  override def healthCheck: F[Either[String, Unit]] = Async[F]
-    .fromCompletableFuture(Async[F].delay(
-      client
-        .describeTable(DescribeTableRequest.builder().tableName(tableName).build())
-        .toCompletableFuture,
-    )).map(_ => Right(())).handleError(e => Left(e.getMessage))
+  override def healthCheck: F[Either[String, Unit]] =
+    dynamoHealthCheck(client, tableName)
 
   private def getOrInitState(
       key: String,
@@ -189,8 +188,9 @@ class DynamoDBRateLimitStore[F[_]: Async](
       expectedVersion: Long,
       newState: TokenBucketState,
       ttlSeconds: Long,
+      now: Long,
   ): F[Boolean] =
-    val ttl = System.currentTimeMillis() / 1000 + ttlSeconds
+    val ttl = now / 1000 + ttlSeconds
 
     val item = Map(
       "pk" -> attr(s"ratelimit#$key"),

@@ -15,6 +15,7 @@ import core.*
 import events.EventPublisher
 import _root_.metrics.MetricsPublisher
 import security.AuthenticatedClient
+import testutil.*
 import cats.effect.*
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*
@@ -24,14 +25,6 @@ import io.circe.parser.*
   * exceeds max.
   */
 class IdempotencyApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
-
-  val testClient: AuthenticatedClient = AuthenticatedClient(
-    apiKeyId = "test-client",
-    clientId = "test-client",
-    clientName = "Test",
-    tier = security.ClientTier.Free,
-    permissions = security.Permission.standard,
-  )
 
   "IdempotencyApi TTL capping" - {
 
@@ -146,19 +139,3 @@ class IdempotencyApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
       }
     }
   }
-
-  /** Logger that appends warn messages to a Ref for test assertions. */
-  private def capturingLogger(warnLogs: Ref[IO, List[String]]): Logger[IO] =
-    new Logger[IO]:
-      override def error(t: Throwable)(message: => String): IO[Unit] = IO.unit
-      override def error(message: => String): IO[Unit] = IO.unit
-      override def warn(t: Throwable)(message: => String): IO[Unit] = warnLogs
-        .update(_ :+ message)
-      override def warn(message: => String): IO[Unit] = warnLogs
-        .update(_ :+ message)
-      override def info(t: Throwable)(message: => String): IO[Unit] = IO.unit
-      override def info(message: => String): IO[Unit] = IO.unit
-      override def debug(t: Throwable)(message: => String): IO[Unit] = IO.unit
-      override def debug(message: => String): IO[Unit] = IO.unit
-      override def trace(t: Throwable)(message: => String): IO[Unit] = IO.unit
-      override def trace(message: => String): IO[Unit] = IO.unit

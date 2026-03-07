@@ -184,7 +184,7 @@ class IdempotencyApi[F[_]: Async](
             originalRequestTime = startedAt,
           )
 
-    eventPublisher.publish(event).handleError(error =>
+    eventPublisher.publish(event).handleErrorWith(error =>
       logger.warn(s"Failed to publish idempotency event: ${error.getMessage}"),
     )
 

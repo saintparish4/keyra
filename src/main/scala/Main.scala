@@ -72,36 +72,48 @@ object Main extends IOApp:
         BroadcastingEventPublisher(underlyingEventPublisher, dashboardQueue)
 
       // Initialize rate limit store (algorithm + backend)
-      rateLimitStore <-
-        (config.aws.localstack, config.rateLimit.algorithm) match
-          case (true, _) => Resource.eval(RateLimitStore.inMemory[IO])
-          case (false, "leaky-bucket") =>
-            for
-              dynamoClient <- AwsClients
-                .dynamoDbClient[IO](config.aws, config.dynamodb)
-              store = LeakyBucketRateLimitStore[IO](
-                dynamoClient,
-                config.dynamodb.rateLimitTable,
-              )
-            yield store
-          case (false, _) =>
-            for
-              dynamoClient <- AwsClients
-                .dynamoDbClient[IO](config.aws, config.dynamodb)
-              store = new DynamoDBRateLimitStore[IO](
-                dynamoClient,
-                config.dynamodb.rateLimitTable,
-                logger,
-                metricsPublisher,
-              )
-            yield store
+      rateLimitStore <- config.storage.backend match
+        case "in-memory" => Resource.eval(RateLimitStore.inMemory[IO])
+        case _ => config.rateLimit.algorithm match
+            case "leaky-bucket" =>
+              for
+                dynamoClient <- AwsClients
+                  .dynamoDbClient[IO](config.aws, config.dynamodb)
+                store = LeakyBucketRateLimitStore[IO](
+                  dynamoClient,
+                  config.dynamodb.rateLimitTable,
+                  logger,
+                  metricsPublisher,
+                )
+              yield store
+            case _ =>
+              for
+                dynamoClient <- AwsClients
+                  .dynamoDbClient[IO](config.aws, config.dynamodb)
+                store = new DynamoDBRateLimitStore[IO](
+                  dynamoClient,
+                  config.dynamodb.rateLimitTable,
+                  logger,
+                  metricsPublisher,
+                )
+              yield store
       _ <- Resource.eval(logger.info(s"Rate limit store initialized: ${config
           .rateLimit.algorithm}"))
 
+      // Wrap with resilience patterns (circuit breaker -> bulkhead -> retry)
+      resilientStore <- ResilientRateLimitStore[IO](
+        rateLimitStore,
+        config.resilience,
+        metricsPublisher,
+        eventPublisher,
+        config.resilience.parsedDegradationMode,
+      )
+      _ <- Resource.eval(logger.info("Resilient rate limit store initialized"))
+
       // Initialize idempotency store
-      idempotencyStore <- config.aws.localstack match
-        case true => Resource.eval(IdempotencyStore.inMemory[IO])
-        case false =>
+      idempotencyStore <- config.storage.backend match
+        case "in-memory" => Resource.eval(IdempotencyStore.inMemory[IO])
+        case _ =>
           for
             dynamoClient <- AwsClients
               .dynamoDbClient[IO](config.aws, config.dynamodb)

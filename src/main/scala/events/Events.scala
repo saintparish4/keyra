@@ -90,17 +90,16 @@ object RateLimitEvent:
     val partitionKey = service
 
   // JSON encoder for events
-  given Encoder[RateLimitEvent] = Encoder.instance {
-    case e: Allowed => e.asJson
-        .deepMerge(Json.obj("event_type" -> Json.fromString(e.eventType)))
-    case e: Rejected => e.asJson
-        .deepMerge(Json.obj("event_type" -> Json.fromString(e.eventType)))
-    case e: IdempotencyHit => e.asJson
-        .deepMerge(Json.obj("event_type" -> Json.fromString(e.eventType)))
-    case e: IdempotencyNew => e.asJson
-        .deepMerge(Json.obj("event_type" -> Json.fromString(e.eventType)))
-    case e: CircuitBreakerStateChange => e.asJson
-        .deepMerge(Json.obj("event_type" -> Json.fromString(e.eventType)))
-    case e: DegradedModeChange => e.asJson
-        .deepMerge(Json.obj("event_type" -> Json.fromString(e.eventType)))
+  private def withEventType(json: Json, eventType: String): Json = json
+    .deepMerge(Json.obj("event_type" -> Json.fromString(eventType)))
+
+  given Encoder[RateLimitEvent] = Encoder.instance { event =>
+    val (json, eventType) = event match
+      case e: Allowed => (e.asJson, e.eventType)
+      case e: Rejected => (e.asJson, e.eventType)
+      case e: IdempotencyHit => (e.asJson, e.eventType)
+      case e: IdempotencyNew => (e.asJson, e.eventType)
+      case e: CircuitBreakerStateChange => (e.asJson, e.eventType)
+      case e: DegradedModeChange => (e.asJson, e.eventType)
+    withEventType(json, eventType)
   }
