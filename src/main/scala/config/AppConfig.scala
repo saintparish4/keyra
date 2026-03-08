@@ -103,6 +103,17 @@ case class IdempotencyConfig(
     maxTtlSeconds: Long = 86400,
 ) derives ConfigReader
 
+// Token quota limits for AI workloads (per-user, per-agent, per-org)
+case class TokenQuotaConfig(
+    enabled: Boolean = false,
+    tableName: String = "keyra-token-quotas",
+    userLimit: Long = 1_000_000,
+    userWindowSeconds: Long = 3600,
+    agentLimit: Long = 500_000,
+    agentWindowSeconds: Long = 3600,
+    orgLimit: Long = 10_000_000,
+    orgWindowSeconds: Long = 86400,
+) derives ConfigReader
 // Resilience configuration
 case class CircuitBreakerConfig(
     maxFailures: Int = 5,
@@ -164,6 +175,7 @@ case class StorageConfig(
 case class AppConfig(
     server: ServerConfig,
     aws: AwsConfig,
+    tokenQuota: TokenQuotaConfig = TokenQuotaConfig(),
     dynamodb: DynamoDBConfig,
     kinesis: KinesisConfig,
     rateLimit: RateLimitConfig,
@@ -182,10 +194,18 @@ object AppConfig:
     .delay(ConfigSource.default.loadOrThrow[AppConfig]).flatMap { config =>
       val profileErrors = config.rateLimit.profiles.toList
         .flatMap { case (name, p) => p.validate(name).left.toOption }
-      if profileErrors.nonEmpty then
-        Sync[F].raiseError(new IllegalArgumentException(
-          s"Invalid rate limit profiles: ${profileErrors.mkString("; ")}",
-        ))
+      val agentCap = (config.tokenQuota.userLimit * 0.8).toLong
+      val quotaErrors =
+        if config.tokenQuota.enabled && config.tokenQuota.agentLimit > agentCap
+        then
+          List(s"agentLimit (${config.tokenQuota
+              .agentLimit}) exceeds 80% of userLimit ($agentCap)")
+        else Nil
+      val allErrors = profileErrors ++ quotaErrors
+      if allErrors.nonEmpty then
+        Sync[F]
+          .raiseError(new IllegalArgumentException(s"Invalid config: ${allErrors
+              .mkString("; ")}"))
       else Sync[F].pure(config)
     }
 

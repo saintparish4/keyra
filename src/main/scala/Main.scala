@@ -124,6 +124,87 @@ object Main extends IOApp:
           yield store
       _ <- Resource.eval(logger.info("Idempotency store initialized"))
 
+      // Initialize token quota store + service (if enabled)
+      tokenQuotaApi <- config.tokenQuota.enabled match
+        case true => config.storage.backend match
+            case "in-memory" => Resource.eval {
+                Ref.of[IO, Map[String, core.TokenQuotaState]](Map.empty).map {
+                  ref =>
+                    val inMemStore = new core.TokenQuotaStore[IO]:
+                      override def getQuota(
+                          pk: String,
+                      ): IO[Option[core.TokenQuotaState]] = ref.get.map(_.get(pk))
+                      override def incrementQuota(
+                          pk: String,
+                          inputDelta: Long,
+                          outputDelta: Long,
+                          windowSec: Long,
+                          nowMs: Long,
+                      ): IO[Boolean] = ref.modify { m =>
+                        val current = m.get(pk)
+                        val withinWindow = current
+                          .exists(s => nowMs - s.windowStart < windowSec * 1000)
+                        if withinWindow then
+                          val s = current.get
+                          val updated = core.TokenQuotaState(
+                            math.max(0, s.inputTokens + inputDelta),
+                            math.max(0, s.outputTokens + outputDelta),
+                            s.windowStart,
+                            s.version + 1,
+                          )
+                          (m + (pk -> updated), true)
+                        else
+                          val fresh = core.TokenQuotaState(
+                            math.max(0, inputDelta),
+                            math.max(0, outputDelta),
+                            nowMs,
+                            1L,
+                          )
+                          (m + (pk -> fresh), true)
+                      }
+                      override def healthCheck: IO[Either[String, Unit]] = IO
+                        .pure(Right(()))
+                    val svc = core.TokenQuotaService[IO](
+                      inMemStore,
+                      config.tokenQuota,
+                      metricsPublisher,
+                      logger,
+                    )
+                    Some(api.TokenQuotaApi[IO](
+                      svc,
+                      eventPublisher,
+                      metricsPublisher,
+                      logger,
+                    ))
+                }
+              }
+            case _ =>
+              for
+                dynamoClient <- AwsClients
+                  .dynamoDbClient[IO](config.aws, config.dynamodb)
+                store = storage.DynamoDBTokenQuotaStore[IO](
+                  dynamoClient,
+                  config.tokenQuota.tableName,
+                  logger,
+                  metricsPublisher,
+                )
+                svc = core.TokenQuotaService[IO](
+                  store,
+                  config.tokenQuota,
+                  metricsPublisher,
+                  logger,
+                )
+              yield Some(api.TokenQuotaApi[IO](
+                svc,
+                eventPublisher,
+                metricsPublisher,
+                logger,
+              ))
+        case false => Resource.pure[IO, Option[api.TokenQuotaApi[IO]]](None)
+      _ <- Resource
+        .eval(logger.info(s"Token quota service initialized: enabled=${config
+            .tokenQuota.enabled}"))
+
       // Initialize API key store
       apiKeyStore <- config.security.secrets.enabled match
         case true =>
@@ -169,6 +250,7 @@ object Main extends IOApp:
         config.idempotency,
         logger,
         Some(dashboardQueue),
+        tokenQuotaApi,
       ))
       _ <- Resource.eval(logger.info("HTTP routes initialized"))
 

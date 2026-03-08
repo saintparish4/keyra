@@ -67,6 +67,39 @@ resource "aws_dynamodb_table" "idempotency" {
   }
 }
 
+# Token Quotas Table
+resource "aws_dynamodb_table" "token_quotas" {
+  name         = "${var.project_name}-${var.environment}-token-quotas"
+  billing_mode = var.token_quota_table_config.billing_mode
+  hash_key     = "pk"
+
+  read_capacity  = var.token_quota_table_config.billing_mode == "PROVISIONED" ? var.token_quota_table_config.read_capacity : null
+  write_capacity = var.token_quota_table_config.billing_mode == "PROVISIONED" ? var.token_quota_table_config.write_capacity : null
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
+  point_in_time_recovery {
+    enabled = var.environment == "prod" ? true : false
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  tags = {
+    Name    = "${var.project_name}-${var.environment}-token-quotas"
+    Purpose = "AI token quota tracking"
+  }
+}
+
 # Auto-scaling for PROVISIONED mode
 resource "aws_appautoscaling_target" "rate_limits_read" {
   count              = var.rate_limit_table_config.billing_mode == "PROVISIONED" ? 1 : 0

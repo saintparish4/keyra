@@ -107,6 +107,30 @@ awslocal dynamodb update-time-to-live \
   --table-name idempotency \
   --time-to-live-specification Enabled=true,AttributeName=ttl 2>/dev/null || echo "Note: TTL update skipped (may already be enabled or not supported)"
 
+# Create DynamoDB table: keyra-token-quotas
+if table_exists "keyra-token-quotas"; then
+    echo "DynamoDB table 'keyra-token-quotas' already exists, skipping creation"
+else
+    echo "Creating DynamoDB table: keyra-token-quotas"
+    if awslocal dynamodb create-table \
+      --table-name keyra-token-quotas \
+      --attribute-definitions AttributeName=pk,AttributeType=S \
+      --key-schema AttributeName=pk,KeyType=HASH \
+      --billing-mode PAY_PER_REQUEST \
+      --tags Key=Environment,Value=local; then
+        echo "Waiting for table 'keyra-token-quotas' to become active..."
+        awslocal dynamodb wait table-exists --table-name keyra-token-quotas || true
+    else
+        echo "WARNING: Failed to create table 'keyra-token-quotas', it may already exist"
+    fi
+fi
+
+# Enable TTL on keyra-token-quotas table
+echo "Enabling TTL on keyra-token-quotas table"
+awslocal dynamodb update-time-to-live \
+  --table-name keyra-token-quotas \
+  --time-to-live-specification Enabled=true,AttributeName=ttl 2>/dev/null || echo "Note: TTL update skipped (may already be enabled or not supported)"
+
 # Wait for Kinesis service
 wait_for_service "kinesis"
 

@@ -89,6 +89,20 @@ object RateLimitEvent:
     val eventType = "degraded_mode_change"
     val partitionKey = service
 
+  /** Token quota exceeded for an AI workload. */
+  case class TokenQuotaExceeded(
+      timestamp: Instant,
+      userId: String,
+      agentId: String,
+      orgId: String,
+      level: String,
+      limit: Long,
+      used: Long,
+      apiKey: String,
+  ) extends RateLimitEvent:
+    val eventType = "token_quota_exceeded"
+    val partitionKey = userId
+
   // JSON encoder for events
   private def withEventType(json: Json, eventType: String): Json = json
     .deepMerge(Json.obj("event_type" -> Json.fromString(eventType)))
@@ -101,5 +115,6 @@ object RateLimitEvent:
       case e: IdempotencyNew => (e.asJson, e.eventType)
       case e: CircuitBreakerStateChange => (e.asJson, e.eventType)
       case e: DegradedModeChange => (e.asJson, e.eventType)
+      case e: TokenQuotaExceeded => (e.asJson, e.eventType)
     withEventType(json, eventType)
   }

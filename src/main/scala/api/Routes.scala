@@ -19,7 +19,7 @@ import core.*
 import events.*
 import _root_.metrics.MetricsPublisher
 import security.*
-import config.{IdempotencyConfig, RateLimitConfig}
+import config.{IdempotencyConfig, RateLimitConfig, TokenQuotaConfig}
 
 /** HTTP routes for the rate limiter API.
   *
@@ -39,6 +39,7 @@ class Routes[F[_]: Async](
     idempotencyConfig: IdempotencyConfig,
     logger: Logger[F],
     dashboardApi: DashboardApi[F],
+    tokenQuotaApi: Option[TokenQuotaApi[F]],
 ) extends Http4sDsl[F]:
 
   private val rateLimitApi = RateLimitApi[F](
@@ -115,6 +116,18 @@ class Routes[F[_]: Async](
       // Store idempotency response
       case req @ POST -> Root / "v1" / "idempotency" / key / "complete" as
           client => idempotencyApi.complete(key, req.req, client)
+
+      // Token quota check
+      case req @ POST -> Root / "v1" / "quota" / "check" as client =>
+        tokenQuotaApi match
+          case Some(api) => api.check(req.req, client)
+          case None => Response[F](status = Status.NotFound).pure[F]
+
+      // Token quota reconcile
+      case req @ POST -> Root / "v1" / "quota" / "reconcile" as client =>
+        tokenQuotaApi match
+          case Some(api) => api.reconcile(req.req, client)
+          case None => Response[F](status = Status.NotFound).pure[F]
     }
 
   // Combined routes — dashboard is public, API routes require auth
@@ -145,6 +158,7 @@ object Routes:
       idempotencyConfig: IdempotencyConfig,
       logger: Logger[F],
       dashboardEventQueue: Option[Queue[F, RateLimitEvent]] = None,
+      tokenQuotaApi: Option[TokenQuotaApi[F]] = None,
   ): F[Routes[F]] =
     for
       dashboardApi <- DashboardApi.apply[F](
@@ -164,5 +178,6 @@ object Routes:
         idempotencyConfig,
         logger,
         dashboardApi,
+        tokenQuotaApi,
       )
     yield routes

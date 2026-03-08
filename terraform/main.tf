@@ -70,6 +70,12 @@ module "dynamodb" {
     read_capacity  = var.dynamodb_read_capacity
     write_capacity = var.dynamodb_write_capacity
   }
+
+  token_quota_table_config = {
+    billing_mode   = var.dynamodb_billing_mode
+    read_capacity  = var.dynamodb_read_capacity
+    write_capacity = var.dynamodb_write_capacity
+  }
 }
 
 # Kinesis Streams
@@ -115,6 +121,7 @@ module "ecs" {
     AWS_REGION           = var.aws_region
     RATE_LIMIT_TABLE     = module.dynamodb.rate_limit_table_name
     IDEMPOTENCY_TABLE    = module.dynamodb.idempotency_table_name
+    TOKEN_QUOTA_TABLE    = module.dynamodb.token_quota_table_name
     KINESIS_STREAM       = module.kinesis.stream_name
     KINESIS_ENABLED      = "true"
     METRICS_ENABLED      = "true"
@@ -126,7 +133,8 @@ module "ecs" {
   # IAM permissions
   dynamodb_table_arns = [
     module.dynamodb.rate_limit_table_arn,
-    module.dynamodb.idempotency_table_arn
+    module.dynamodb.idempotency_table_arn,
+    module.dynamodb.token_quota_table_arn
   ]
   kinesis_stream_arn     = module.kinesis.stream_arn
   secrets_manager_arn    = module.secrets.api_keys_secret_arn

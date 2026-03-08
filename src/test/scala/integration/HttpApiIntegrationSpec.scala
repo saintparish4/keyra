@@ -46,7 +46,7 @@ class HttpApiIntegrationSpec
   // Test configuration
   lazy val testRateLimitConfig: RateLimitConfig = RateLimitConfig(
     defaultCapacity = 10,
-    defaultRefillRatePerSecond = 1.0,
+    defaultRefillRatePerSecond = 0.1,
     defaultTtlSeconds = 3600,
   )
 
@@ -104,6 +104,7 @@ class HttpApiIntegrationSpec
     testIdempotencyConfig,
     logger,
     dashboardApi,
+    tokenQuotaApi = None,
   )
 
   lazy val httpApp: HttpApp[IO] = routes.httpApp

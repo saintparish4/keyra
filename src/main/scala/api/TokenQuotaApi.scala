@@ -1,0 +1,183 @@
+package api
+
+import java.time.Instant
+
+import org.http4s.*
+import org.http4s.circe.*
+import org.http4s.circe.CirceEntityDecoder.*
+import org.http4s.circe.CirceEntityEncoder.*
+import org.http4s.dsl.Http4sDsl
+import org.typelevel.ci.*
+import org.typelevel.log4cats.Logger
+
+import cats.effect.*
+import cats.effect.syntax.spawn.*
+import cats.syntax.all.*
+import io.circe.generic.auto.*
+import io.circe.syntax.*
+import core.*
+import events.*
+import _root_.metrics.MetricsPublisher
+import security.*
+
+class TokenQuotaApi[F[_]: Async](
+    quotaService: TokenQuotaService[F],
+    eventPublisher: EventPublisher[F],
+    metricsPublisher: MetricsPublisher[F],
+    logger: Logger[F],
+) extends Http4sDsl[F]:
+
+  /** POST /v1/quota/check
+    *
+    * Pre-request: check if estimated token usage is within quota.
+    */
+  def check(request: Request[F], client: AuthenticatedClient): F[Response[F]] =
+    for
+      startTime <- Clock[F].realTime.map(_.toMillis)
+      req <- request.as[TokenQuotaCheckRequest]
+
+      response <-
+        if req.estimatedInputTokens < 0 || req.estimatedOutputTokens < 0 then
+          BadRequest(io.circe.Json.obj(
+            "error" -> io.circe.Json.fromString("validation_error"),
+            "message" -> io.circe.Json.fromString("token estimates must be non-negative"),
+          ))
+        else
+          for
+            identifier <- Async[F].pure(QuotaIdentifier(
+              userId = req.userId,
+              agentId = req.agentId,
+              orgId = req.orgId,
+            ))
+            decision <- quotaService.checkQuota(
+              identifier, req.estimatedInputTokens, req.estimatedOutputTokens,
+            )
+
+            latency <- Clock[F].realTime.map(_.toMillis - startTime)
+            _ <- metricsPublisher.recordLatency("token_quota_check", latency.toDouble)
+
+            now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
+            _ <- publishQuotaEvent(decision, req, client, now).start
+
+            resp <- buildCheckResponse(decision)
+          yield resp
+    yield response
+
+  /** POST /v1/quota/reconcile
+    *
+    * Post-LLM-call: adjust quota counters with actual token usage.
+    */
+  def reconcile(request: Request[F], client: AuthenticatedClient): F[Response[F]] =
+    for
+      startTime <- Clock[F].realTime.map(_.toMillis)
+      req <- request.as[TokenQuotaReconcileRequest]
+
+      identifier = QuotaIdentifier(
+        userId = req.userId,
+        agentId = req.agentId,
+        orgId = req.orgId,
+      )
+
+      _ <- quotaService.reconcile(
+        identifier,
+        req.actualInputTokens,
+        req.actualOutputTokens,
+        req.estimatedInputTokens,
+        req.estimatedOutputTokens,
+      )
+
+      latency <- Clock[F].realTime.map(_.toMillis - startTime)
+      _ <- metricsPublisher.recordLatency("token_quota_reconcile", latency.toDouble)
+
+      resp <- Ok(TokenQuotaReconcileResponse(
+        status = "reconciled",
+        inputDelta = req.actualInputTokens - req.estimatedInputTokens,
+        outputDelta = req.actualOutputTokens - req.estimatedOutputTokens,
+      ).asJson)
+    yield resp
+
+  private def buildCheckResponse(decision: QuotaDecision): F[Response[F]] =
+    decision match
+      case QuotaDecision.Available(remaining) =>
+        Ok(TokenQuotaCheckResponse(
+          allowed = true,
+          remainingTokens = remaining.map { case (level, rem) => level.prefix -> rem },
+          exceededLevel = None,
+          retryAfter = None,
+        ).asJson)
+      case QuotaDecision.Exceeded(level, limit, used, retryAfter) =>
+        TooManyRequests(TokenQuotaCheckResponse(
+          allowed = false,
+          remainingTokens = Map.empty,
+          exceededLevel = Some(level.prefix),
+          retryAfter = Some(retryAfter),
+          message = Some(s"${level.prefix} quota exceeded: $used/$limit tokens used"),
+        ).asJson).map(_.putHeaders(
+          Header.Raw(ci"Retry-After", retryAfter.toString),
+        ))
+
+  private def publishQuotaEvent(
+      decision: QuotaDecision,
+      req: TokenQuotaCheckRequest,
+      client: AuthenticatedClient,
+      timestamp: Instant,
+  ): F[Unit] =
+    decision match
+      case QuotaDecision.Exceeded(level, limit, used, _) =>
+        val event = RateLimitEvent.TokenQuotaExceeded(
+          timestamp = timestamp,
+          userId = req.userId,
+          agentId = req.agentId.getOrElse("none"),
+          orgId = req.orgId.getOrElse("none"),
+          level = level.prefix,
+          limit = limit,
+          used = used,
+          apiKey = client.apiKeyId,
+        )
+        eventPublisher.publish(event).handleErrorWith(error =>
+          logger.warn(s"Failed to publish token quota event: ${error.getMessage}"),
+        )
+      case _ => Async[F].unit
+
+// Request/Response models
+
+case class TokenQuotaCheckRequest(
+    userId: String,
+    agentId: Option[String] = None,
+    orgId: Option[String] = None,
+    estimatedInputTokens: Long,
+    estimatedOutputTokens: Long = 0,
+)
+
+case class TokenQuotaCheckResponse(
+    allowed: Boolean,
+    remainingTokens: Map[String, Long],
+    exceededLevel: Option[String] = None,
+    retryAfter: Option[Int] = None,
+    message: Option[String] = None,
+)
+
+case class TokenQuotaReconcileRequest(
+    userId: String,
+    agentId: Option[String] = None,
+    orgId: Option[String] = None,
+    actualInputTokens: Long,
+    actualOutputTokens: Long,
+    estimatedInputTokens: Long,
+    estimatedOutputTokens: Long,
+)
+
+case class TokenQuotaReconcileResponse(
+    status: String,
+    inputDelta: Long,
+    outputDelta: Long,
+)
+
+object TokenQuotaApi:
+  def apply[F[_]: Async](
+      quotaService: TokenQuotaService[F],
+      eventPublisher: EventPublisher[F],
+      metricsPublisher: MetricsPublisher[F],
+      logger: Logger[F],
+  ): TokenQuotaApi[F] =
+    new TokenQuotaApi[F](quotaService, eventPublisher, metricsPublisher, logger)

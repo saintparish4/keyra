@@ -13,3 +13,11 @@ output "idempotency_table_name" {
 output "idempotency_table_arn" {
   value = aws_dynamodb_table.idempotency.arn
 }
+
+output "token_quota_table_name" {
+  value = aws_dynamodb_table.token_quotas.name
+}
+
+output "token_quota_table_arn" {
+  value = aws_dynamodb_table.token_quotas.arn
+}
