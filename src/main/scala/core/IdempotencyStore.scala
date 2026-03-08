@@ -28,6 +28,15 @@ object IdempotencyResult:
   case class InProgress(idempotencyKey: String, startedAt: Instant)
       extends IdempotencyResult
 
+  /** Idempotency key exists but the request body hash doesn't match. Caller
+    * should respond 409 Conflict.
+    */
+  case class KeyConflict(
+      idempotencyKey: String,
+      storedHash: Option[String],
+      incomingHash: Option[String],
+  ) extends IdempotencyResult
+
 /** Stored response from a previous idempotent operation.
   */
 case class StoredResponse(
@@ -48,6 +57,7 @@ case class IdempotencyRecord(
     updatedAt: Instant,
     ttl: Long,
     version: Long,
+    requestHash: Option[String] = None,
 )
 
 sealed trait IdempotencyStatus
@@ -69,8 +79,15 @@ trait IdempotencyStore[F[_]]:
     *
     * Uses first-writer-wins semantics:
     *   - If key doesn't exist: create it with Pending status, return New
-    *   - If key exists with Pending: return InProgress
+    *   - If key exists with Pending: return InProgress (or KeyConflict if
+    *     requestHash differs)
     *   - If key exists with Completed: return Duplicate with stored response
+    *     (or KeyConflict if requestHash differs)
+    *   - If key exists with Failed: allow retry, create new Pending record,
+    *     return New
+    *
+    * When both caller and stored record have a requestHash, a mismatch yields
+    * KeyConflict (caller should respond 409).
     *
     * @param idempotencyKey
     *   Unique key for this operation
@@ -78,13 +95,18 @@ trait IdempotencyStore[F[_]]:
     *   Client making the request (for audit/logging)
     * @param ttlSeconds
     *   Time-to-live for the record
+    * @param requestHash
+    *   Optional hash of the request body; if present and differing from stored,
+    *   returns KeyConflict
     * @return
-    *   Result indicating if this is new, duplicate, or in-progress
+    *   Result indicating if this is new, duplicate, in-progress, or key
+    *   conflict
     */
   def check(
       idempotencyKey: String,
       clientId: String,
       ttlSeconds: Long,
+      requestHash: Option[String] = None,
   ): F[IdempotencyResult]
 
   /** Store the response for a completed operation.
@@ -143,25 +165,56 @@ object IdempotencyStore:
             idempotencyKey: String,
             clientId: String,
             ttlSeconds: Long,
+            requestHash: Option[String] = None,
         ): F[IdempotencyResult] =
           for
             now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
             result <- stateRef.modify { records =>
               records.get(idempotencyKey) match
                 case Some(existing) => existing.status match
-                    case IdempotencyStatus.Pending => (
-                        records,
-                        IdempotencyResult
-                          .InProgress(idempotencyKey, existing.createdAt),
-                      )
-                    case IdempotencyStatus.Completed => (
-                        records,
-                        IdempotencyResult.Duplicate(
-                          idempotencyKey,
-                          existing.response,
-                          existing.createdAt,
-                        ),
-                      )
+                    case IdempotencyStatus.Pending =>
+                      val conflict =
+                        for
+                          incoming <- requestHash
+                          stored <- existing.requestHash if incoming != stored
+                        yield ()
+                      conflict match
+                        case Some(_) => (
+                            records,
+                            IdempotencyResult.KeyConflict(
+                              idempotencyKey,
+                              existing.requestHash,
+                              requestHash,
+                            ),
+                          )
+                        case None => (
+                            records,
+                            IdempotencyResult
+                              .InProgress(idempotencyKey, existing.createdAt),
+                          )
+                    case IdempotencyStatus.Completed =>
+                      val conflict =
+                        for
+                          incoming <- requestHash
+                          stored <- existing.requestHash if incoming != stored
+                        yield ()
+                      conflict match
+                        case Some(_) => (
+                            records,
+                            IdempotencyResult.KeyConflict(
+                              idempotencyKey,
+                              existing.requestHash,
+                              requestHash,
+                            ),
+                          )
+                        case None => (
+                            records,
+                            IdempotencyResult.Duplicate(
+                              idempotencyKey,
+                              existing.response,
+                              existing.createdAt,
+                            ),
+                          )
                     case IdempotencyStatus.Failed =>
                       // Allow retry on failed
                       val newRecord = IdempotencyRecord(
@@ -173,6 +226,7 @@ object IdempotencyStore:
                         updatedAt = now,
                         ttl = now.getEpochSecond + ttlSeconds,
                         version = existing.version + 1,
+                        requestHash = requestHash,
                       )
                       (
                         records + (idempotencyKey -> newRecord),
@@ -189,6 +243,7 @@ object IdempotencyStore:
                     updatedAt = now,
                     ttl = now.getEpochSecond + ttlSeconds,
                     version = 1,
+                    requestHash = requestHash,
                   )
                   (
                     records + (idempotencyKey -> newRecord),

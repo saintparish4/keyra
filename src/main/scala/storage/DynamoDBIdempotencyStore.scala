@@ -43,34 +43,87 @@ class DynamoDBIdempotencyStore[F[_]: Async](
       idempotencyKey: String,
       clientId: String,
       ttlSeconds: Long,
+      requestHash: Option[String] = None,
+  ): F[IdempotencyResult] = checkWithRetry(
+    idempotencyKey,
+    clientId,
+    ttlSeconds,
+    requestHash,
+    retries = 3,
+  )
+
+  private def checkWithRetry(
+      idempotencyKey: String,
+      clientId: String,
+      ttlSeconds: Long,
+      requestHash: Option[String],
+      retries: Int,
   ): F[IdempotencyResult] =
     for
       now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
-
-      // Try to create new record with condition
-      result <- tryCreatePending(idempotencyKey, clientId, now, ttlSeconds)
-        .flatMap {
-          case true => Async[F].pure(IdempotencyResult.New(idempotencyKey, now))
-          case false =>
-            // Record exists - check its status
-            get(idempotencyKey).map {
-              case Some(record) => record.status match
-                  case IdempotencyStatus.Pending => IdempotencyResult
-                      .InProgress(idempotencyKey, record.createdAt)
-                  case IdempotencyStatus.Completed => IdempotencyResult
-                      .Duplicate(
-                        idempotencyKey,
-                        record.response,
-                        record.createdAt,
-                      )
-                  case IdempotencyStatus.Failed =>
-                    // Allow retry - try to update to Pending
-                    IdempotencyResult.New(idempotencyKey, now) // Simplified: just allow retry
-              case None =>
-                // Rare race condition - record was deleted
-                IdempotencyResult.New(idempotencyKey, now)
-            }
-        }
+      result <-
+        tryCreatePending(idempotencyKey, clientId, now, ttlSeconds, requestHash)
+          .flatMap {
+            case true => Async[F].pure(IdempotencyResult.New(idempotencyKey, now))
+            case false => get(idempotencyKey).flatMap {
+                case Some(record) => record.status match
+                    case IdempotencyStatus.Pending => requestHash match
+                        case Some(incoming) =>
+                          val stored = record.requestHash
+                          if stored.contains(incoming) || stored.isEmpty then
+                            Async[F].pure(
+                              IdempotencyResult
+                                .InProgress(idempotencyKey, record.createdAt),
+                            )
+                          else
+                            Async[F].pure(IdempotencyResult.KeyConflict(
+                              idempotencyKey,
+                              stored,
+                              Some(incoming),
+                            ))
+                        case None => Async[F].pure(
+                            IdempotencyResult
+                              .InProgress(idempotencyKey, record.createdAt),
+                          )
+                    case IdempotencyStatus.Completed => requestHash match
+                        case Some(incoming) =>
+                          val stored = record.requestHash
+                          if stored.contains(incoming) || stored.isEmpty then
+                            Async[F].pure(IdempotencyResult.Duplicate(
+                              idempotencyKey,
+                              record.response,
+                              record.createdAt,
+                            ))
+                          else
+                            Async[F].pure(IdempotencyResult.KeyConflict(
+                              idempotencyKey,
+                              stored,
+                              Some(incoming),
+                            ))
+                        case None => Async[F].pure(IdempotencyResult.Duplicate(
+                            idempotencyKey,
+                            record.response,
+                            record.createdAt,
+                          ))
+                    case IdempotencyStatus.Failed => Async[F]
+                        .pure(IdempotencyResult.New(idempotencyKey, now))
+                case None =>
+                  // TTL deleted the record between tryCreatePending and get.
+                  // Retry the full operation instead of returning New without persisting.
+                  if retries > 0 then
+                    checkWithRetry(
+                      idempotencyKey,
+                      clientId,
+                      ttlSeconds,
+                      requestHash,
+                      retries - 1,
+                    )
+                  else
+                    Async[F].raiseError(new RuntimeException(
+                      s"Idempotency TOCTOU race exhausted retries for key=$idempotencyKey",
+                    ))
+              }
+          }
     yield result
 
   override def storeResponse(
@@ -151,10 +204,11 @@ class DynamoDBIdempotencyStore[F[_]: Async](
       clientId: String,
       now: Instant,
       ttlSeconds: Long,
+      requestHash: Option[String],
   ): F[Boolean] =
     val ttl = now.getEpochSecond + ttlSeconds
 
-    val item = Map(
+    val baseItem = Map(
       "pk" -> attr(s"idempotency#$idempotencyKey"),
       "clientId" -> attr(clientId),
       "status" -> attr("Pending"),
@@ -163,6 +217,10 @@ class DynamoDBIdempotencyStore[F[_]: Async](
       "version" -> attrN(1),
       "ttl" -> attrN(ttl),
     )
+
+    val item = requestHash match
+      case Some(hash) => baseItem + ("requestHash" -> attr(hash))
+      case None => baseItem
 
     val request = PutItemRequest.builder().tableName(tableName).item(item.asJava)
       .conditionExpression("attribute_not_exists(pk) OR #status = :failed")
@@ -199,6 +257,7 @@ class DynamoDBIdempotencyStore[F[_]: Async](
                 s"response JSON decode failed: $err",
               ))
 
+    val requestHash = item.get("requestHash").map(_.s())
     for
       status <- statusResult
       response <- responseResult
@@ -215,6 +274,7 @@ class DynamoDBIdempotencyStore[F[_]: Async](
       updatedAt = updatedAt,
       ttl = item.get("ttl").map(_.n().toLong).getOrElse(0L),
       version = item.get("version").map(_.n().toLong).getOrElse(0L),
+      requestHash = requestHash,
     )
 
 object DynamoDBIdempotencyStore:

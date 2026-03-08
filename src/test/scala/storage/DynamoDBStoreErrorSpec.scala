@@ -251,6 +251,7 @@ class DynamoDBStoreErrorSpec
             key: String,
             clientId: String,
             ttlSeconds: Long,
+            requestHash: Option[String] = None,
         ): IO[IdempotencyResult] = IO
           .raiseError(new CorruptIdempotencyRecordException(key, detail))
         def storeResponse(key: String, response: StoredResponse): IO[Boolean] =

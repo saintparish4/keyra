@@ -19,21 +19,55 @@ class InMemoryIdempotencyStore[F[_]: Temporal](
       idempotencyKey: String,
       clientId: String,
       ttlSeconds: Long,
+      requestHash: Option[String] = None,
   ): F[IdempotencyResult] =
     for
       now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
       result <- stateRef.modify { stateMap =>
         stateMap.get(idempotencyKey) match
           case Some(record) => record.status match
-              case IdempotencyStatus.Pending => (
-                  stateMap,
-                  IdempotencyResult.InProgress(idempotencyKey, record.createdAt),
-                )
-              case IdempotencyStatus.Completed => (
-                  stateMap,
-                  IdempotencyResult
-                    .Duplicate(idempotencyKey, record.response, record.createdAt),
-                )
+              case IdempotencyStatus.Pending =>
+                val conflict = for
+                  incoming <- requestHash
+                  stored   <- record.requestHash
+                  if incoming != stored
+                yield ()
+                conflict match
+                  case Some(_) => (
+                      stateMap,
+                      IdempotencyResult.KeyConflict(
+                        idempotencyKey,
+                        record.requestHash,
+                        requestHash,
+                      ),
+                    )
+                  case None => (
+                      stateMap,
+                      IdempotencyResult.InProgress(idempotencyKey, record.createdAt),
+                    )
+              case IdempotencyStatus.Completed =>
+                val conflict = for
+                  incoming <- requestHash
+                  stored   <- record.requestHash
+                  if incoming != stored
+                yield ()
+                conflict match
+                  case Some(_) => (
+                      stateMap,
+                      IdempotencyResult.KeyConflict(
+                        idempotencyKey,
+                        record.requestHash,
+                        requestHash,
+                      ),
+                    )
+                  case None => (
+                      stateMap,
+                      IdempotencyResult.Duplicate(
+                        idempotencyKey,
+                        record.response,
+                        record.createdAt,
+                      ),
+                    )
               case IdempotencyStatus.Failed =>
                 // Allow retry on failed - create new pending record
                 val newRecord = IdempotencyRecord(
@@ -45,6 +79,7 @@ class InMemoryIdempotencyStore[F[_]: Temporal](
                   updatedAt = now,
                   ttl = now.getEpochSecond + ttlSeconds,
                   version = record.version + 1,
+                  requestHash = requestHash,
                 )
                 (
                   stateMap.updated(idempotencyKey, newRecord),
@@ -61,6 +96,7 @@ class InMemoryIdempotencyStore[F[_]: Temporal](
               updatedAt = now,
               ttl = now.getEpochSecond + ttlSeconds,
               version = 1,
+              requestHash = requestHash,
             )
             (
               stateMap.updated(idempotencyKey, newRecord),

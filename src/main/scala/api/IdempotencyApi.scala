@@ -1,5 +1,6 @@
 package api
 
+import java.security.MessageDigest
 import java.time.Instant
 
 import org.http4s.*
@@ -51,10 +52,13 @@ class IdempotencyApi[F[_]: Async](
           )
         else ().pure[F]
 
-      // Perform idempotency check
+      requestHash = checkReq.requestBody.map(sha256)
+
       _ <- logger.debug(s"Idempotency check: key=${checkReq
-          .idempotencyKey}, client=${client.apiKeyId}")
-      result <- store.check(checkReq.idempotencyKey, client.apiKeyId, ttlSeconds)
+          .idempotencyKey}, client=${client.apiKeyId}, hasHash=${requestHash
+          .isDefined}")
+      result <- store
+        .check(checkReq.idempotencyKey, client.apiKeyId, ttlSeconds, requestHash)
 
       // Record metrics
       latency <- Clock[F].realTime.map(_.toMillis - startTime)
@@ -156,6 +160,22 @@ class IdempotencyApi[F[_]: Async](
           ).asJson,
         )
 
+      case IdempotencyResult.KeyConflict(key, _, _) => Conflict(
+          IdempotencyCheckResponse(
+            status = "conflict",
+            idempotencyKey = key,
+            originalResponse = None,
+            message =
+              Some("Request body does not match the original request for this idempotency key"),
+          ).asJson,
+        )
+
+  private def sha256(input: String): String =
+    val digest = MessageDigest.getInstance("SHA-256")
+    val hash = digest
+      .digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    hash.map(b => "%02x".format(b)).mkString
+
   private def publishEvent(
       result: IdempotencyResult,
       client: AuthenticatedClient,
@@ -183,6 +203,13 @@ class IdempotencyApi[F[_]: Async](
             clientId = client.apiKeyId,
             originalRequestTime = startedAt,
           )
+      case IdempotencyResult.KeyConflict(key, _, _) => RateLimitEvent
+          .IdempotencyHit(
+            timestamp = timestamp,
+            idempotencyKey = key,
+            clientId = client.apiKeyId,
+            originalRequestTime = timestamp,
+          )
 
     eventPublisher.publish(event).handleErrorWith(error =>
       logger.warn(s"Failed to publish idempotency event: ${error.getMessage}"),
@@ -192,6 +219,7 @@ class IdempotencyApi[F[_]: Async](
 case class IdempotencyCheckRequest(
     idempotencyKey: String,
     ttl: Option[Long] = None,
+    requestBody: Option[String] = None,
 )
 
 case class IdempotencyCheckResponse(

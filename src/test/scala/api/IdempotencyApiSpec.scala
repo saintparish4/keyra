@@ -42,6 +42,7 @@ class IdempotencyApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
                 idempotencyKey: String,
                 clientId: String,
                 ttlSeconds: Long,
+                requestHash: Option[String] = None,
             ): IO[IdempotencyResult] = capturedTtl.set(Some(ttlSeconds)) *>
               Clock[IO].realTime.map(d =>
                 IdempotencyResult
@@ -98,6 +99,7 @@ class IdempotencyApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
                 idempotencyKey: String,
                 clientId: String,
                 ttlSeconds: Long,
+                requestHash: Option[String] = None,
             ): IO[IdempotencyResult] = Clock[IO].realTime.map(d =>
               IdempotencyResult
                 .New(idempotencyKey, Instant.ofEpochMilli(d.toMillis)),
