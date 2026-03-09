@@ -14,6 +14,7 @@ sealed trait RateLimitEvent:
   def timestamp: Instant
   def eventType: String
   def partitionKey: String
+  def traceId: Option[String] = None
 
 object RateLimitEvent:
   /** Request was allowed within rate limit.
@@ -26,6 +27,7 @@ object RateLimitEvent:
       tokensRemaining: Int,
       cost: Int,
       tier: String,
+      override val traceId: Option[String] = None,
   ) extends RateLimitEvent:
     val eventType = "rate_limit_allowed"
     val partitionKey = apiKey
@@ -40,6 +42,7 @@ object RateLimitEvent:
       retryAfterSeconds: Int,
       reason: String,
       tier: String,
+      override val traceId: Option[String] = None,
   ) extends RateLimitEvent:
     val eventType = "rate_limit_rejected"
     val partitionKey = apiKey
@@ -51,6 +54,7 @@ object RateLimitEvent:
       idempotencyKey: String,
       clientId: String,
       originalRequestTime: Instant,
+      override val traceId: Option[String] = None,
   ) extends RateLimitEvent:
     val eventType = "idempotency_hit"
     val partitionKey = clientId
@@ -62,6 +66,7 @@ object RateLimitEvent:
       idempotencyKey: String,
       clientId: String,
       ttlSeconds: Long,
+      override val traceId: Option[String] = None,
   ) extends RateLimitEvent:
     val eventType = "idempotency_new"
     val partitionKey = clientId
@@ -74,6 +79,7 @@ object RateLimitEvent:
       previousState: String,
       newState: String,
       failureCount: Int,
+      override val traceId: Option[String] = None,
   ) extends RateLimitEvent:
     val eventType = "circuit_breaker_state_change"
     val partitionKey = name
@@ -85,6 +91,7 @@ object RateLimitEvent:
       service: String,
       degraded: Boolean,
       reason: String,
+      override val traceId: Option[String] = None,
   ) extends RateLimitEvent:
     val eventType = "degraded_mode_change"
     val partitionKey = service
@@ -99,13 +106,23 @@ object RateLimitEvent:
       limit: Long,
       used: Long,
       apiKey: String,
+      override val traceId: Option[String] = None,
   ) extends RateLimitEvent:
     val eventType = "token_quota_exceeded"
     val partitionKey = userId
 
   // JSON encoder for events
-  private def withEventType(json: Json, eventType: String): Json = json
-    .deepMerge(Json.obj("event_type" -> Json.fromString(eventType)))
+  private def withMetadata(
+      json: Json,
+      eventType: String,
+      traceId: Option[String],
+  ): Json =
+    val base = json.deepMerge(Json.obj(
+      "event_type" -> Json.fromString(eventType),
+    ))
+    traceId.fold(base)(tid =>
+      base.deepMerge(Json.obj("trace_id" -> Json.fromString(tid))),
+    )
 
   given Encoder[RateLimitEvent] = Encoder.instance { event =>
     val (json, eventType) = event match
@@ -116,5 +133,5 @@ object RateLimitEvent:
       case e: CircuitBreakerStateChange => (e.asJson, e.eventType)
       case e: DegradedModeChange => (e.asJson, e.eventType)
       case e: TokenQuotaExceeded => (e.asJson, e.eventType)
-    withEventType(json, eventType)
+    withMetadata(json, eventType, event.traceId)
   }

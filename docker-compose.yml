@@ -41,6 +41,10 @@ services:
       - IDEMPOTENCY_TABLE=idempotency
       - KINESIS_STREAM=rate-limit-events
       - KINESIS_ENABLED=true
+      # OpenTelemetry: send traces to Jaeger on host (e.g. docker run -p 4317:4317 jaegertracing/all-in-one)
+      - TRACING_ENABLED=true
+      - OTEL_SERVICE_NAME=keyra
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
     depends_on:
       localstack:
         condition: service_healthy

@@ -20,6 +20,7 @@ import cats.effect.*
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*
 import io.circe.parser.*
+import org.typelevel.otel4s.trace.Tracer.Implicits.noop
 
 /** Unit tests for IdempotencyApi: TTL capping and warning when client TTL
   * exceeds max.

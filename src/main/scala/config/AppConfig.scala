@@ -52,6 +52,16 @@ case class MetricsConfig(
     flushThreshold: Int = 1000,
 ) derives ConfigReader
 
+case class PrometheusConfig(
+    enabled: Boolean = true,
+) derives ConfigReader
+
+case class TracingConfig(
+    enabled: Boolean = false,
+    serviceName: String = "keyra",
+    exporterEndpoint: String = "http://localhost:4317",
+) derives ConfigReader
+
 // Security configuration
 case class AuthenticationConfig(
     enabled: Boolean = true,
@@ -181,6 +191,8 @@ case class AppConfig(
     rateLimit: RateLimitConfig,
     idempotency: IdempotencyConfig = IdempotencyConfig(),
     metrics: MetricsConfig = MetricsConfig(),
+    prometheus: PrometheusConfig = PrometheusConfig(),
+    tracing: TracingConfig = TracingConfig(),
     security: SecurityConfig = SecurityConfig(
       authentication = AuthenticationConfig(),
       secrets = SecretsConfig(),

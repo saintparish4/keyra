@@ -25,6 +25,7 @@ import cats.effect.IO
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
+import org.typelevel.otel4s.trace.Tracer.Implicits.noop
 import io.circe.generic.auto.*
 import io.circe.parser.*
 
@@ -105,6 +106,7 @@ class HttpApiIntegrationSpec
     logger,
     dashboardApi,
     tokenQuotaApi = None,
+    prometheusMetrics = None,
   )
 
   lazy val httpApp: HttpApp[IO] = routes.httpApp

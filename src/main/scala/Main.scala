@@ -4,6 +4,8 @@ import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.server.Server
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.oteljava.OtelJava
 
 import com.comcast.ip4s.*
 
@@ -17,6 +19,7 @@ import events.{
 }
 import cats.effect.std.Queue
 import _root_.metrics.MetricsPublisher
+import _root_.metrics.{PrometheusMetrics, TracingMiddleware}
 import resilience.*
 import security.*
 import storage.*
@@ -52,6 +55,17 @@ object Main extends IOApp:
             .pure[IO, MetricsPublisher[IO]](MetricsPublisher.noop[IO])
       _ <- Resource.eval(logger.info("Metrics publisher initialized"))
 
+      // Prometheus metrics registry
+      promMetrics <- config.prometheus.enabled match
+        case true => Resource.eval(PrometheusMetrics[IO].map(Some(_)))
+        case false => Resource.pure[IO, Option[PrometheusMetrics[IO]]](None)
+      _ <- Resource.eval(logger.info(s"Prometheus metrics: enabled=${config.prometheus.enabled}"))
+
+      // Wrap publisher for dual CloudWatch + Prometheus export
+      metricsPublisher2 = promMetrics match
+        case Some(prom) => PrometheusMetrics.dual[IO](metricsPublisher, prom)
+        case None => metricsPublisher
+
       // Initialize event publisher — Kinesis uses a bounded queue + drain fiber
       // managed by KinesisPublisher.resource so the fiber is properly cancelled on shutdown
       underlyingEventPublisher <- config.kinesis.enabled match
@@ -60,7 +74,7 @@ object Main extends IOApp:
             kinesisClient <- AwsClients
               .kinesisClient[IO](config.aws, config.dynamodb)
             publisher <- KinesisPublisher
-              .resource[IO](kinesisClient, config.kinesis, metricsPublisher)
+              .resource[IO](kinesisClient, config.kinesis, metricsPublisher2)
           yield publisher
         case false => Resource
             .pure[IO, EventPublisher[IO]](EventPublisher.noop[IO])
@@ -83,7 +97,7 @@ object Main extends IOApp:
                   dynamoClient,
                   config.dynamodb.rateLimitTable,
                   logger,
-                  metricsPublisher,
+                  metricsPublisher2,
                 )
               yield store
             case _ =>
@@ -94,7 +108,7 @@ object Main extends IOApp:
                   dynamoClient,
                   config.dynamodb.rateLimitTable,
                   logger,
-                  metricsPublisher,
+                  metricsPublisher2,
                 )
               yield store
       _ <- Resource.eval(logger.info(s"Rate limit store initialized: ${config
@@ -104,7 +118,7 @@ object Main extends IOApp:
       resilientStore <- ResilientRateLimitStore[IO](
         rateLimitStore,
         config.resilience,
-        metricsPublisher,
+        metricsPublisher2,
         eventPublisher,
         config.resilience.parsedDegradationMode,
       )
@@ -123,6 +137,17 @@ object Main extends IOApp:
             )
           yield store
       _ <- Resource.eval(logger.info("Idempotency store initialized"))
+
+      // OpenTelemetry tracer (uses OTEL_SERVICE_NAME, OTEL_EXPORTER_OTLP_ENDPOINT from env or config)
+      given Tracer[IO] <- config.tracing.enabled match
+        case true =>
+          for
+            otelJava <- OtelJava.autoConfigured[IO]()
+            tracer <- Resource.eval(otelJava.tracerProvider.get("keyra"))
+          yield tracer
+        case false =>
+          Resource.pure[IO, Tracer[IO]](Tracer.noop[IO])
+      _ <- Resource.eval(logger.info(s"Tracing: enabled=${config.tracing.enabled}"))
 
       // Initialize token quota store + service (if enabled)
       tokenQuotaApi <- config.tokenQuota.enabled match
@@ -167,13 +192,13 @@ object Main extends IOApp:
                     val svc = core.TokenQuotaService[IO](
                       inMemStore,
                       config.tokenQuota,
-                      metricsPublisher,
+                      metricsPublisher2,
                       logger,
                     )
                     Some(api.TokenQuotaApi[IO](
                       svc,
                       eventPublisher,
-                      metricsPublisher,
+                      metricsPublisher2,
                       logger,
                     ))
                 }
@@ -186,18 +211,18 @@ object Main extends IOApp:
                   dynamoClient,
                   config.tokenQuota.tableName,
                   logger,
-                  metricsPublisher,
+                  metricsPublisher2,
                 )
                 svc = core.TokenQuotaService[IO](
                   store,
                   config.tokenQuota,
-                  metricsPublisher,
+                  metricsPublisher2,
                   logger,
                 )
               yield Some(api.TokenQuotaApi[IO](
                 svc,
                 eventPublisher,
-                metricsPublisher,
+                metricsPublisher2,
                 logger,
               ))
         case false => Resource.pure[IO, Option[api.TokenQuotaApi[IO]]](None)
@@ -244,13 +269,14 @@ object Main extends IOApp:
         rateLimitStore,
         idempotencyStore,
         eventPublisher,
-        metricsPublisher,
+        metricsPublisher2,
         authMiddleware,
         config.rateLimit,
         config.idempotency,
         logger,
         Some(dashboardQueue),
         tokenQuotaApi,
+        promMetrics,
       ))
       _ <- Resource.eval(logger.info("HTTP routes initialized"))
 

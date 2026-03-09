@@ -18,12 +18,14 @@ import io.circe.syntax.*
 import core.*
 import events.*
 import _root_.metrics.MetricsPublisher
+import _root_.metrics.TracingMiddleware
+import org.typelevel.otel4s.trace.Tracer
 import security.*
 import config.RateLimitConfig
 
 /** Rate limit API endpoints.
   */
-class RateLimitApi[F[_]: Async](
+class RateLimitApi[F[_]: Async: Tracer](
     store: RateLimitStore[F],
     eventPublisher: EventPublisher[F],
     metricsPublisher: MetricsPublisher[F],
@@ -55,8 +57,9 @@ class RateLimitApi[F[_]: Async](
             // Perform rate limit check
             _ <- logger.debug(s"Rate limit check: key=${checkReq
                 .key}, cost=${checkReq.cost}, tier=${client.tier}")
-            decision <- store
-              .checkAndConsume(checkReq.key, checkReq.cost, profile)
+            decision <- TracingMiddleware.traced("checkAndConsume") {
+              store.checkAndConsume(checkReq.key, checkReq.cost, profile)
+            }
 
             // Record metrics
             latency <- Clock[F].realTime.map(_.toMillis - startTime)
@@ -70,7 +73,8 @@ class RateLimitApi[F[_]: Async](
 
             // Publish event (fire and forget)
             now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
-            _ <- publishEvent(decision, checkReq, client, now).start
+            traceId <- currentTraceId
+            _ <- publishEvent(decision, checkReq, client, now, traceId).start
 
             // Build response
             resp <- buildCheckResponse(decision, profile)
@@ -159,11 +163,17 @@ class RateLimitApi[F[_]: Async](
         ).asJson,
       ).map(_.putHeaders(Header.Raw(ci"Retry-After", retryAfter.toString)))
 
+  private def currentTraceId: F[Option[String]] =
+    Tracer[F].currentSpanContext.map(
+      _.filter(_.isValid).map(_.traceIdHex),
+    )
+
   private def publishEvent(
       decision: RateLimitDecision,
       request: RateLimitCheckRequest,
       client: AuthenticatedClient,
       timestamp: Instant,
+      traceId: Option[String],
   ): F[Unit] =
     val event = decision match
       case RateLimitDecision.Allowed(tokensRemaining, _) => RateLimitEvent
@@ -175,6 +185,7 @@ class RateLimitApi[F[_]: Async](
             tokensRemaining = tokensRemaining,
             cost = request.cost,
             tier = client.tier.toString,
+            traceId = traceId,
           )
       case RateLimitDecision.Rejected(retryAfter, _) => RateLimitEvent.Rejected(
           timestamp = timestamp,
@@ -184,6 +195,7 @@ class RateLimitApi[F[_]: Async](
           retryAfterSeconds = retryAfter,
           reason = "Rate limit exceeded",
           tier = client.tier.toString,
+          traceId = traceId,
         )
 
     eventPublisher.publish(event).handleErrorWith(error =>
@@ -215,7 +227,7 @@ case class RateLimitStatusResponse(
 )
 
 object RateLimitApi:
-  def apply[F[_]: Async](
+  def apply[F[_]: Async: Tracer](
       store: RateLimitStore[F],
       eventPublisher: EventPublisher[F],
       metricsPublisher: MetricsPublisher[F],

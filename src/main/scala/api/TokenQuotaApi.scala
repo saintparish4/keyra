@@ -18,9 +18,11 @@ import io.circe.syntax.*
 import core.*
 import events.*
 import _root_.metrics.MetricsPublisher
+import _root_.metrics.TracingMiddleware
+import org.typelevel.otel4s.trace.Tracer
 import security.*
 
-class TokenQuotaApi[F[_]: Async](
+class TokenQuotaApi[F[_]: Async: Tracer](
     quotaService: TokenQuotaService[F],
     eventPublisher: EventPublisher[F],
     metricsPublisher: MetricsPublisher[F],
@@ -49,15 +51,18 @@ class TokenQuotaApi[F[_]: Async](
               agentId = req.agentId,
               orgId = req.orgId,
             ))
-            decision <- quotaService.checkQuota(
-              identifier, req.estimatedInputTokens, req.estimatedOutputTokens,
-            )
+            decision <- TracingMiddleware.traced("checkQuota") {
+              quotaService.checkQuota(
+                identifier, req.estimatedInputTokens, req.estimatedOutputTokens,
+              )
+            }
 
             latency <- Clock[F].realTime.map(_.toMillis - startTime)
             _ <- metricsPublisher.recordLatency("token_quota_check", latency.toDouble)
 
             now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
-            _ <- publishQuotaEvent(decision, req, client, now).start
+            traceId <- currentTraceId
+            _ <- publishQuotaEvent(decision, req, client, now, traceId).start
 
             resp <- buildCheckResponse(decision)
           yield resp
@@ -116,11 +121,17 @@ class TokenQuotaApi[F[_]: Async](
           Header.Raw(ci"Retry-After", retryAfter.toString),
         ))
 
+  private def currentTraceId: F[Option[String]] =
+    Tracer[F].currentSpanContext.map(
+      _.filter(_.isValid).map(_.traceIdHex),
+    )
+
   private def publishQuotaEvent(
       decision: QuotaDecision,
       req: TokenQuotaCheckRequest,
       client: AuthenticatedClient,
       timestamp: Instant,
+      traceId: Option[String],
   ): F[Unit] =
     decision match
       case QuotaDecision.Exceeded(level, limit, used, _) =>
@@ -133,6 +144,7 @@ class TokenQuotaApi[F[_]: Async](
           limit = limit,
           used = used,
           apiKey = client.apiKeyId,
+          traceId = traceId,
         )
         eventPublisher.publish(event).handleErrorWith(error =>
           logger.warn(s"Failed to publish token quota event: ${error.getMessage}"),
@@ -174,7 +186,7 @@ case class TokenQuotaReconcileResponse(
 )
 
 object TokenQuotaApi:
-  def apply[F[_]: Async](
+  def apply[F[_]: Async: Tracer](
       quotaService: TokenQuotaService[F],
       eventPublisher: EventPublisher[F],
       metricsPublisher: MetricsPublisher[F],

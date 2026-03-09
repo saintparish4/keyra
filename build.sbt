@@ -3,6 +3,9 @@ val Http4sVersion = "0.23.32"
 val CirceVersion = "0.14.15"
 val CatsEffectVersion = "3.6.3"
 val AwsSdkVersion = "2.38.7"
+val PrometheusVersion = "0.16.0" 
+val Otel4sVersion = "0.15.2"
+val OtelSdkVersion = "1.60.1" 
 
 libraryDependencies ++= Seq(
   // HTTP4s
@@ -39,8 +42,18 @@ libraryDependencies ++= Seq(
   "org.scalatest" %% "scalatest" % "3.2.19" % Test,
   "org.typelevel" %% "cats-effect-testing-scalatest" % "1.7.0" % Test,
   "org.testcontainers" % "localstack" % "1.21.4" % Test,
-)
 
+   // Prometheus metrics
+  "io.prometheus" % "simpleclient" % PrometheusVersion,
+  "io.prometheus" % "simpleclient_common" % PrometheusVersion,
+  "io.prometheus" % "simpleclient_hotspot" % PrometheusVersion,
+
+  // OpenTelemetry / otel4s
+  "org.typelevel" %% "otel4s-oteljava" % Otel4sVersion,
+  "io.opentelemetry" % "opentelemetry-exporter-otlp" % OtelSdkVersion % Runtime,
+  "io.opentelemetry" % "opentelemetry-sdk-extension-autoconfigure" % OtelSdkVersion % Runtime,
+)
+javaOptions += "-Dotel.java.global-autoconfigure.enabled=true"
 // Docker plugin
 enablePlugins(JavaAppPackaging, DockerPlugin)
 

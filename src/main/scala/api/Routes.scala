@@ -7,8 +7,10 @@ import org.http4s.circe.*
 import org.http4s.circe.CirceEntityDecoder.*
 import org.http4s.circe.CirceEntityEncoder.*
 import org.http4s.dsl.Http4sDsl
+import org.http4s.headers.`Content-Type`
 import org.http4s.server.{AuthMiddleware, Router}
 import org.typelevel.log4cats.Logger
+import org.typelevel.otel4s.trace.Tracer
 
 import cats.effect.*
 import cats.effect.std.Queue
@@ -18,6 +20,7 @@ import io.circe.syntax.*
 import core.*
 import events.*
 import _root_.metrics.MetricsPublisher
+import _root_.metrics.{PrometheusMetrics, TracingMiddleware}
 import security.*
 import config.{IdempotencyConfig, RateLimitConfig, TokenQuotaConfig}
 
@@ -29,7 +32,7 @@ import config.{IdempotencyConfig, RateLimitConfig, TokenQuotaConfig}
   *   - Health and readiness probes
   *   - Metrics (admin only)
   */
-class Routes[F[_]: Async](
+class Routes[F[_]: Async: Tracer](
     rateLimitStore: RateLimitStore[F],
     idempotencyStore: IdempotencyStore[F],
     eventPublisher: EventPublisher[F],
@@ -40,6 +43,7 @@ class Routes[F[_]: Async](
     logger: Logger[F],
     dashboardApi: DashboardApi[F],
     tokenQuotaApi: Option[TokenQuotaApi[F]],
+    prometheusMetrics: Option[PrometheusMetrics[F]],
 ) extends Http4sDsl[F]:
 
   private val rateLimitApi = RateLimitApi[F](
@@ -63,6 +67,17 @@ class Routes[F[_]: Async](
     // Liveness probe - always returns 200 if service is running
     case GET -> Root / "health" =>
       Ok(HealthResponse("healthy", BuildInfo.version).asJson)
+
+    // Prometheus metrics scrape endpoint
+    case GET -> Root / "metrics" =>
+      prometheusMetrics match
+        case Some(prom) =>
+          prom.scrape.flatMap(body =>
+            Ok(body).map(_.withContentType(
+              `Content-Type`(org.http4s.MediaType.text.plain),
+            )),
+          )
+        case None => NotFound()
 
     // Readiness probe - checks dependencies
     case GET -> Root / "ready" =>
@@ -130,9 +145,10 @@ class Routes[F[_]: Async](
           case None => Response[F](status = Status.NotFound).pure[F]
     }
 
-  // Combined routes — dashboard is public, API routes require auth
-  val routes: HttpRoutes[F] = dashboardApi.routes <+> publicRoutes <+>
-    authMiddleware(authedRoutes)
+  // Combined routes — public (health, metrics, ready) first so scrapers never hit auth
+  val routes: HttpRoutes[F] = TracingMiddleware[F](
+    publicRoutes <+> dashboardApi.routes <+> authMiddleware(authedRoutes),
+  )
 
   def httpApp: HttpApp[F] = Router("/" -> routes).orNotFound
 
@@ -148,7 +164,7 @@ object BuildInfo:
   val version = "0.2.0"
 
 object Routes:
-  def apply[F[_]: Async](
+  def apply[F[_]: Async: Tracer](
       rateLimitStore: RateLimitStore[F],
       idempotencyStore: IdempotencyStore[F],
       eventPublisher: EventPublisher[F],
@@ -159,6 +175,7 @@ object Routes:
       logger: Logger[F],
       dashboardEventQueue: Option[Queue[F, RateLimitEvent]] = None,
       tokenQuotaApi: Option[TokenQuotaApi[F]] = None,
+      prometheusMetrics: Option[PrometheusMetrics[F]] = None,
   ): F[Routes[F]] =
     for
       dashboardApi <- DashboardApi.apply[F](
@@ -179,5 +196,6 @@ object Routes:
         logger,
         dashboardApi,
         tokenQuotaApi,
+        prometheusMetrics,
       )
     yield routes

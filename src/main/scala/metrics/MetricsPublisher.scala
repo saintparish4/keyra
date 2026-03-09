@@ -2,39 +2,27 @@ package metrics
 
 import java.time.Instant
 
+import scala.collection.immutable.Queue
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 import org.typelevel.log4cats.Logger
 
 import cats.effect.*
-import cats.effect.syntax.spawn.*
+import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import software.amazon.awssdk.services.cloudwatch.CloudWatchAsyncClient
 import software.amazon.awssdk.services.cloudwatch.model.*
 
-/** Production-grade metrics publisher for CloudWatch.
-  *
-  * Provides:
-  *   - Rate limit decision metrics
-  *   - Latency histograms
-  *   - Circuit breaker state metrics
-  *   - Cache hit/miss ratios
-  *   - Error tracking
-  *   - Custom business metrics
-  */
-
-/** Metrics configuration.
-  */
 case class MetricsConfig(
     namespace: String = "RateLimiter",
     environment: String = "dev",
     flushInterval: FiniteDuration = 60.seconds,
     batchSize: Int = 20,
     enabled: Boolean = true,
-    highResolution: Boolean = false, // 1-second resolution costs extra
-    maxBufferSize: Int = 50000, // oldest entries dropped when buffer is full
-    flushThreshold: Int = 1000, // trigger an async flush when buffer reaches this size
+    highResolution: Boolean = false,
+    maxBufferSize: Int = 50000,
+    flushThreshold: Int = 1000,
 )
 
 object MetricsConfig:
@@ -46,8 +34,6 @@ object MetricsConfig:
     highResolution = true,
   )
 
-/** Metric data point.
-  */
 case class MetricDataPoint(
     name: String,
     value: Double,
@@ -56,88 +42,86 @@ case class MetricDataPoint(
     timestamp: Option[Instant] = None,
 )
 
-/** Metrics publisher trait.
+/** Internal buffer state: Queue for O(1) enqueue/dequeue, separate size counter
+  * to avoid O(n) Queue.size calls on every metric write.
   */
+private[metrics] case class BufferState(
+    queue: Queue[MetricDataPoint] = Queue.empty,
+    size: Int = 0,
+):
+  def enqueue(point: MetricDataPoint, maxSize: Int): BufferState =
+    if size >= maxSize then
+      val (_, trimmed) = queue.dequeue
+      BufferState(trimmed.enqueue(point), size)
+    else BufferState(queue.enqueue(point), size + 1)
+
+  def drainAll: (BufferState, List[MetricDataPoint]) =
+    (BufferState(), queue.toList)
+
 trait MetricsPublisher[F[_]]:
-  /** Record a counter increment */
   def increment(
       name: String,
       dimensions: Map[String, String] = Map.empty,
   ): F[Unit]
 
-  /** Record a gauge value */
   def gauge(
       name: String,
       value: Double,
       dimensions: Map[String, String] = Map.empty,
   ): F[Unit]
 
-  /** Record a latency measurement */
   def recordLatency(
       name: String,
       latencyMs: Double,
       dimensions: Map[String, String] = Map.empty,
   ): F[Unit]
 
-  /** Time an operation and record latency */
   def timed[A](name: String, dimensions: Map[String, String] = Map.empty)(
       fa: F[A],
   ): F[A]
 
-  /** Record a rate limit decision */
   def recordRateLimitDecision(
       allowed: Boolean,
       clientId: String,
       tier: String = "unknown",
   ): F[Unit]
 
-  /** Record circuit breaker state change */
   def recordCircuitBreakerState(
       name: String,
       state: String,
       failureCount: Int,
   ): F[Unit]
 
-  /** Record cache metrics */
   def recordCacheMetrics(cacheName: String, hitRate: Double, size: Long): F[Unit]
 
-  /** Record degraded mode operation */
   def recordDegradedOperation(operation: String): F[Unit]
 
-  /** Flush pending metrics */
   def flush: F[Unit]
 
 object MetricsPublisher:
 
-  /** Create a CloudWatch metrics publisher with explicit client.
-    */
   def cloudWatch[F[_]: Async: Logger](
       client: CloudWatchAsyncClient,
       config: MetricsConfig,
   ): Resource[F, MetricsPublisher[F]] =
     val logger = Logger[F]
     for
-      bufferRef <- Resource.eval(Ref.of[F, List[MetricDataPoint]](List.empty))
+      bufferRef <- Resource.eval(Ref.of[F, BufferState](BufferState()))
       lastFlushRef <- Resource.eval(Ref.of[F, Long](System.currentTimeMillis()))
+      flushingRef <- Resource.eval(Ref.of[F, Boolean](false))
       _ <-
         if config.enabled then
-          // Background periodic flush fiber; on shutdown, cancel then flush remaining
-          Resource.make(flushLoop(bufferRef, lastFlushRef, client, config).start)(
-            fiber =>
-              fiber.cancel *>
-                doFlush(bufferRef, lastFlushRef, client, config, logger),
+          Resource.make(
+            flushLoop(bufferRef, lastFlushRef, flushingRef, client, config).start,
+          )(fiber =>
+            fiber.cancel *>
+              doFlush(bufferRef, lastFlushRef, flushingRef, client, config, logger),
           )
         else Resource.pure[F, Fiber[F, Throwable, Nothing]](null)
     yield new CloudWatchMetricsPublisher[F](
-      client,
-      config,
-      bufferRef,
-      lastFlushRef,
+      client, config, bufferRef, lastFlushRef, flushingRef,
     )
 
-  /** Create a CloudWatch metrics publisher with default client and explicit
-    * config. Creates and manages the CloudWatch client internally.
-    */
   def cloudWatch[F[_]: Async: Logger](
       region: String,
       config: MetricsConfig,
@@ -152,17 +136,12 @@ object MetricsPublisher:
 
     clientResource.flatMap(client => cloudWatch(client, config))
 
-  /** Create a CloudWatch metrics publisher using only region and namespace.
-    * Keeps backward compatibility; uses all other defaults.
-    */
   def cloudWatch[F[_]: Async: Logger](
       region: String,
       namespace: String,
   ): Resource[F, MetricsPublisher[F]] =
     cloudWatch(region, MetricsConfig(namespace = namespace))
 
-  /** Create a no-op metrics publisher (for testing).
-    */
   def noop[F[_]: Async]: MetricsPublisher[F] = new MetricsPublisher[F]:
     override def increment(
         name: String,
@@ -201,30 +180,39 @@ object MetricsPublisher:
     override def flush: F[Unit] = Async[F].unit
 
   private def flushLoop[F[_]: Async: Logger](
-      bufferRef: Ref[F, List[MetricDataPoint]],
+      bufferRef: Ref[F, BufferState],
       lastFlushRef: Ref[F, Long],
+      flushingRef: Ref[F, Boolean],
       client: CloudWatchAsyncClient,
       config: MetricsConfig,
   ): F[Nothing] =
     val logger = Logger[F]
     (Async[F].sleep(config.flushInterval) *>
-      doFlush(bufferRef, lastFlushRef, client, config, logger)).foreverM
+      doFlush(bufferRef, lastFlushRef, flushingRef, client, config, logger)).foreverM
 
   def doFlush[F[_]: Async](
-      bufferRef: Ref[F, List[MetricDataPoint]],
+      bufferRef: Ref[F, BufferState],
       lastFlushRef: Ref[F, Long],
+      flushingRef: Ref[F, Boolean],
       client: CloudWatchAsyncClient,
       config: MetricsConfig,
       logger: Logger[F],
   ): F[Unit] =
-    for
-      metrics <- bufferRef.getAndSet(List.empty)
-      _ <-
-        if metrics.nonEmpty then
-          publishMetrics(client, config, metrics, logger) *>
-            lastFlushRef.set(System.currentTimeMillis())
-        else Async[F].unit
-    yield ()
+    // CAS guard: only one flush at a time. If another flush is in progress,
+    // skip this one — the periodic timer or next threshold trigger will retry.
+    flushingRef.getAndSet(true).flatMap {
+      case true => Async[F].unit // another flush is already running
+      case false =>
+        val work = for
+          metrics <- bufferRef.modify(_.drainAll)
+          _ <-
+            if metrics.nonEmpty then
+              publishMetrics(client, config, metrics, logger) *>
+                lastFlushRef.set(System.currentTimeMillis())
+            else Async[F].unit
+        yield ()
+        work.guarantee(flushingRef.set(false))
+    }
 
   private def publishMetrics[F[_]: Async](
       client: CloudWatchAsyncClient,
@@ -243,12 +231,11 @@ object MetricsPublisher:
 
       if dims.nonEmpty then builder.dimensions(dims.asJava)
 
-      if config.highResolution then builder.storageResolution(1) // 1-second resolution
+      if config.highResolution then builder.storageResolution(1)
 
       builder.build()
     }
 
-    // Batch into groups of 20 (CloudWatch limit)
     val batches = metricData.grouped(config.batchSize).toList
 
     batches.traverse_ { batch =>
@@ -261,13 +248,12 @@ object MetricsPublisher:
         )
     }
 
-/** CloudWatch metrics publisher implementation.
-  */
 private class CloudWatchMetricsPublisher[F[_]: Async: Logger](
     client: CloudWatchAsyncClient,
     config: MetricsConfig,
-    bufferRef: Ref[F, List[MetricDataPoint]],
+    bufferRef: Ref[F, BufferState],
     lastFlushRef: Ref[F, Long],
+    flushingRef: Ref[F, Boolean],
 ) extends MetricsPublisher[F]:
 
   private val logger = Logger[F]
@@ -331,33 +317,29 @@ private class CloudWatchMetricsPublisher[F[_]: Async: Logger](
       size: Long,
   ): F[Unit] =
     val dims = Map("CacheName" -> cacheName)
-    gauge("CacheHitRate", hitRate * 100, dims) *> // Percentage
+    gauge("CacheHitRate", hitRate * 100, dims) *>
       gauge("CacheSize", size.toDouble, dims)
 
   override def recordDegradedOperation(operation: String): F[Unit] =
     increment("DegradedOperation", Map("Operation" -> operation))
 
   override def flush: F[Unit] = MetricsPublisher
-    .doFlush(bufferRef, lastFlushRef, client, config, logger)
+    .doFlush(bufferRef, lastFlushRef, flushingRef, client, config, logger)
 
   private def addMetric(metric: MetricDataPoint): F[Unit] =
     if config.enabled then
-      bufferRef.update { buf =>
-        // Buffer is newest-first; tail is the oldest entry — drop it when full
-        val trimmed =
-          if buf.size >= config.maxBufferSize then buf.dropRight(1) else buf
-        metric :: trimmed
-      }.flatMap(_ => triggerFlushIfNeeded)
+      bufferRef.update(_.enqueue(metric, config.maxBufferSize))
+        .flatMap(_ => triggerFlushIfNeeded)
     else Async[F].unit
 
-  private def triggerFlushIfNeeded: F[Unit] = bufferRef.get.flatMap(buf =>
-    // When the buffer reaches the flush threshold, start an async flush fiber
-    // so metrics are not held in memory until the next periodic flush cycle.
-    if buf.size >= config.flushThreshold then
-      MetricsPublisher.doFlush(bufferRef, lastFlushRef, client, config, logger)
-        .start.void
-    else Async[F].unit,
-  )
+  private def triggerFlushIfNeeded: F[Unit] =
+    bufferRef.get.flatMap { buf =>
+      if buf.size >= config.flushThreshold then
+        MetricsPublisher
+          .doFlush(bufferRef, lastFlushRef, flushingRef, client, config, logger)
+          .start.void
+      else Async[F].unit
+    }
 
   private def stateToValue(state: String): Double = state.toLowerCase match
     case "closed" => 0.0
@@ -365,8 +347,6 @@ private class CloudWatchMetricsPublisher[F[_]: Async: Logger](
     case "open" => 1.0
     case _ => -1.0
 
-/** Structured logging metrics for when CloudWatch is unavailable.
-  */
 object LoggingMetrics:
   def apply[F[_]: Async: Logger]: F[MetricsPublisher[F]] =
     val logger = Logger[F]

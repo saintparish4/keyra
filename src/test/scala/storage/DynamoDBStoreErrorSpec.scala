@@ -26,6 +26,7 @@ import testutil.*
 import cats.effect.*
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*
+import org.typelevel.otel4s.trace.Tracer.Implicits.noop
 import io.circe.parser.*
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.*

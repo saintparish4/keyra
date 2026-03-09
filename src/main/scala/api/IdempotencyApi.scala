@@ -19,13 +19,15 @@ import config.IdempotencyConfig
 import core.*
 import events.*
 import _root_.metrics.MetricsPublisher
+import _root_.metrics.TracingMiddleware
+import org.typelevel.otel4s.trace.Tracer
 import security.*
 
 /** Idempotency API endpoints.
   *
   * Provides first-writer-wins idempotency for distributed operations.
   */
-class IdempotencyApi[F[_]: Async](
+class IdempotencyApi[F[_]: Async: Tracer](
     store: IdempotencyStore[F],
     idempotencyConfig: IdempotencyConfig,
     eventPublisher: EventPublisher[F],
@@ -57,8 +59,9 @@ class IdempotencyApi[F[_]: Async](
       _ <- logger.debug(s"Idempotency check: key=${checkReq
           .idempotencyKey}, client=${client.apiKeyId}, hasHash=${requestHash
           .isDefined}")
-      result <- store
-        .check(checkReq.idempotencyKey, client.apiKeyId, ttlSeconds, requestHash)
+      result <- TracingMiddleware.traced("executeIdempotent") {
+        store.check(checkReq.idempotencyKey, client.apiKeyId, ttlSeconds, requestHash)
+      }
 
       // Record metrics
       latency <- Clock[F].realTime.map(_.toMillis - startTime)
@@ -66,7 +69,8 @@ class IdempotencyApi[F[_]: Async](
 
       // Publish event (fire and forget)
       now <- Clock[F].realTime.map(d => Instant.ofEpochMilli(d.toMillis))
-      _ <- publishEvent(result, client, ttlSeconds, now).start
+      traceId <- currentTraceId
+      _ <- publishEvent(result, client, ttlSeconds, now, traceId).start
 
       // Build response
       response <- buildCheckResponse(result)
@@ -176,11 +180,17 @@ class IdempotencyApi[F[_]: Async](
       .digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8))
     hash.map(b => "%02x".format(b)).mkString
 
+  private def currentTraceId: F[Option[String]] =
+    Tracer[F].currentSpanContext.map(
+      _.filter(_.isValid).map(_.traceIdHex),
+    )
+
   private def publishEvent(
       result: IdempotencyResult,
       client: AuthenticatedClient,
       ttlSeconds: Long,
       timestamp: Instant,
+      traceId: Option[String],
   ): F[Unit] =
     val event = result match
       case IdempotencyResult.New(key, _) => RateLimitEvent.IdempotencyNew(
@@ -188,6 +198,7 @@ class IdempotencyApi[F[_]: Async](
           idempotencyKey = key,
           clientId = client.apiKeyId,
           ttlSeconds = ttlSeconds,
+          traceId = traceId,
         )
       case IdempotencyResult.Duplicate(key, _, firstSeenAt) => RateLimitEvent
           .IdempotencyHit(
@@ -195,6 +206,7 @@ class IdempotencyApi[F[_]: Async](
             idempotencyKey = key,
             clientId = client.apiKeyId,
             originalRequestTime = firstSeenAt,
+            traceId = traceId,
           )
       case IdempotencyResult.InProgress(key, startedAt) => RateLimitEvent
           .IdempotencyHit(
@@ -202,6 +214,7 @@ class IdempotencyApi[F[_]: Async](
             idempotencyKey = key,
             clientId = client.apiKeyId,
             originalRequestTime = startedAt,
+            traceId = traceId,
           )
       case IdempotencyResult.KeyConflict(key, _, _) => RateLimitEvent
           .IdempotencyHit(
@@ -209,6 +222,7 @@ class IdempotencyApi[F[_]: Async](
             idempotencyKey = key,
             clientId = client.apiKeyId,
             originalRequestTime = timestamp,
+            traceId = traceId,
           )
 
     eventPublisher.publish(event).handleErrorWith(error =>
@@ -249,7 +263,7 @@ case class IdempotencyCompleteResponse(
 )
 
 object IdempotencyApi:
-  def apply[F[_]: Async](
+  def apply[F[_]: Async: Tracer](
       store: IdempotencyStore[F],
       idempotencyConfig: IdempotencyConfig,
       eventPublisher: EventPublisher[F],
