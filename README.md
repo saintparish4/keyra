@@ -1,32 +1,34 @@
-# Scala Distributed Rate Limiter Platform
+# Keyra — Distributed Rate Limiting & Compliance Platform
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Scala](https://img.shields.io/badge/scala-3.7.4-red.svg)](https://www.scala-lang.org/)
 [![CI](https://github.com/your-org/scalax/workflows/CI/badge.svg)](https://github.com/your-org/scalax/actions)
 
-A distributed rate limiter and idempotency service built with Scala 3, Cats Effect, and DynamoDB. Enforces per-key request limits correctly across multiple stateless instances — without a lock service.
+A distributed rate limiter, idempotency service, and token quota engine built with Scala 3, Cats Effect, and DynamoDB. Enforces per-key request limits and multi-level LLM token quotas correctly across multiple stateless instances — without a lock service.
 
 ### What this system guarantees
 
 | Guarantee | Mechanism |
 |-----------|-----------|
-| **At-most-X RPS per key, globally** | Token bucket per key stored in DynamoDB; OCC (version-based conditional writes) ensures only one instance consumes tokens per logical state change. Tokens never exceed capacity; over any window, allowed requests respect the configured rate. |
-| **Idempotent operations within TTL** | First-writer-wins via DynamoDB conditional `PutItem`. The first successful write for a key wins; duplicates within the TTL window receive the stored response. TTL auto-expiry prevents unbounded table growth. |
-| **Stateless instances** | All rate-limit and idempotency state lives in DynamoDB. Any instance can serve any request; crashes and restarts lose no consistency. |
+| **At-most-X RPS per key, globally** | Token bucket (or leaky bucket) per key stored in DynamoDB; OCC (version-based conditional writes) ensures only one instance consumes tokens per logical state change. Tokens never exceed capacity; over any window, allowed requests respect the configured rate. |
+| **Idempotent operations within TTL** | First-writer-wins via DynamoDB conditional `PutItem`. The first successful write for a key wins; duplicates within the TTL window receive the stored response. SHA-256 request fingerprinting detects same-key different-body conflicts (409). TTL auto-expiry prevents unbounded table growth. |
+| **Multi-level token quotas** | Per-user, per-agent, and per-org LLM token quotas enforced simultaneously. Agent quota is capped at 80% of user quota. Pre-request estimation and post-response reconciliation within 5 seconds. |
+| **Stateless instances** | All rate-limit, idempotency, and token quota state lives in DynamoDB. Any instance can serve any request; crashes and restarts lose no consistency. |
 
 ### What this system is designed to survive
 
 | Failure mode | Behaviour |
 |-------------|-----------|
-| **Partial DynamoDB outage** | DynamoDB client retries with backoff; a circuit breaker stops hammering a failing store. Rate-limit store fails open (allow) on corrupt state with an `ERROR` log and `CorruptStateRead` metric. Readiness probe removes the instance from rotation on dependency failure. |
+| **Partial DynamoDB outage** | Circuit breaker (5 failures → open, 30s reset) stops hammering a failing store. Bulkhead limits concurrent DynamoDB calls to 100. Retry policy with exponential backoff (100ms base, 2× multiplier, max 10s). Configurable degradation mode: `reject-all` (fintech-safe default) or `allow-all` (AI infra). |
 | **Instance crash** | No in-process state. The next instance reads current DynamoDB state and continues correctly. |
-| **Kinesis failure** | Bounded in-memory queue drains to Kinesis; on transient failure one retry, then drop with `DroppedKinesisEvent` metric. The request path is never blocked waiting for Kinesis. |
+| **Kinesis failure** | Bounded in-memory queue drains to Kinesis; on transient failure one retry, then drop with `DroppedKinesisEvent` metric (also exported to Prometheus). The request path is never blocked waiting for Kinesis. |
 | **OCC exhaustion under extreme contention** | After 10 failed conditional writes for the same key in the same window, the request is **rejected** (429). The service under-issues at the tail rather than over-issuing past the rate limit. |
+| **Idempotency TOCTOU race** | If a conditional create fails and the subsequent read returns `None` (TTL deleted between calls), the operation retries up to 3 times instead of silently returning `New`. |
 
 ### Three hard problems this is built around
 
 1. **Distributed token-bucket correctness** — coordinating token consumption across instances without a separate lock service. OCC on DynamoDB version fields is the mechanism; see [OCC flow](#optimistic-concurrency-control-flow) and [performance characteristics](docs/ARCHITECTURE.md).
-2. **Idempotency under concurrency** — exactly-one-Created semantics when many concurrent callers hit the same key simultaneously. Conditional writes (`attribute_not_exists(pk)`) plus consistent reads are the mechanism; see [Idempotency](#idempotency).
+2. **Idempotency under concurrency** — exactly-one-Created semantics when many concurrent callers hit the same key simultaneously. Conditional writes (`attribute_not_exists(pk)`) plus consistent reads are the mechanism; SHA-256 fingerprinting detects body mismatches. See [Idempotency](#idempotency).
 3. **Back-pressure on event publishing** — Kinesis publishing must not block the request path or lose events silently. A bounded queue with a background drain fiber and observable drop counter is the mechanism; see [Metrics](#metrics).
 
 ---
@@ -38,25 +40,38 @@ A distributed rate limiter and idempotency service built with Scala 3, Cats Effe
 ```mermaid
 flowchart LR
     Client[API Client] -->|HTTP| Server[HTTP4s Server]
-    Server --> RateLimiter[Token Bucket Engine]
-    Server --> Idempotency[Idempotency Engine]
-    RateLimiter -->|"Atomic R/W with OCC"| DynamoDB[(DynamoDB)]
+    Server --> Auth[API Key Auth]
+    Auth --> RateLimiter[Token Bucket Engine]
+    Auth --> Idempotency[Idempotency Engine]
+    Auth --> Quota[Token Quota Engine]
+    RateLimiter --> Resilient[Resilience Stack]
+    Resilient --> CB[Circuit Breaker]
+    CB --> BH[Bulkhead]
+    BH --> Retry[Retry Policy]
+    Retry -->|"Atomic R/W with OCC"| DynamoDB[(DynamoDB)]
     Idempotency -->|"Conditional Writes"| DynamoDB
+    Quota -->|"Conditional Writes"| DynamoDB
     RateLimiter -->|"Fire and Forget"| Kinesis[Kinesis Stream]
     Kinesis --> Analytics[Analytics Pipeline]
     subgraph observability [Observability]
+        Prometheus[Prometheus /metrics]
         CloudWatch[CloudWatch]
-        Dashboard[Live Dashboard]
+        OTel[OpenTelemetry Traces]
+        Dashboard[Live Dashboard SSE]
     end
     Server --> observability
 ```
 
 **Key Components:**
-- **HTTP4s API** - RESTful endpoints for rate limiting and idempotency
-- **Token Bucket Engine** - Industry-standard rate limiting algorithm with optimistic concurrency control
-- **DynamoDB Storage** - Distributed state with atomic operations
-- **Kinesis Streaming** - Real-time event pipeline for analytics
-- **ECS Fargate** - Serverless container orchestration
+- **HTTP4s API** — RESTful endpoints for rate limiting, idempotency, and token quotas
+- **Token Bucket / Leaky Bucket Engine** — Rate limiting algorithms with optimistic concurrency control
+- **Resilience Stack** — Circuit breaker → bulkhead → retry → graceful degradation (wired in `Main.scala`)
+- **Token Quota Engine** — Multi-level (user/agent/org) LLM token quota enforcement
+- **DynamoDB Storage** — Distributed state with atomic operations across 3 tables
+- **Kinesis Streaming** — Real-time event pipeline for analytics
+- **Prometheus + CloudWatch** — Dual-publish metrics; Prometheus scrape at `GET /metrics`
+- **OpenTelemetry** — Distributed tracing via otel4s with automatic span propagation
+- **ECS Fargate** — Serverless container orchestration (Terraform-provisioned)
 
 ### Optimistic Concurrency Control Flow
 
@@ -83,7 +98,7 @@ sequenceDiagram
     end
     DB-->>TB: Success (v=4)
     TB-->>API: Allowed (tokens=87)
-    API-->>C: 200 OK
+    API-->>C: 200 OK + X-RateLimit-* headers
 ```
 
 See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design decisions.
@@ -128,6 +143,8 @@ curl -s -X POST http://localhost:8080/v1/ratelimit/check \
   "retryAfter": null
 }
 ```
+
+Response includes standard rate-limit headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
 
 **Step 4 — Exhaust the bucket (rate-limited response)**
 
@@ -182,9 +199,52 @@ curl -s -X POST http://localhost:8080/v1/idempotency/check \
 { "status": "in_progress", "idempotencyKey": "payment:demo-001" }
 ```
 
-The second call sees the existing `Pending` record and returns `in_progress` — the client knows not to rerun the payment. Once the operation is completed via `/v1/idempotency/:key/complete`, further replays return `duplicate` with the stored response body.
+The second call sees the existing `Pending` record and returns `in_progress` — the client knows not to rerun the payment. Once the operation is completed via `/v1/idempotency/:key/complete`, further replays return `duplicate` with the stored response body. If a replay sends a different request body, the service returns `409 Conflict` (request hash mismatch).
+
+**Step 7 — Check LLM token quota (optional, requires `TOKEN_QUOTA_ENABLED=true`)**
+
+```bash
+curl -s -X POST http://localhost:8080/v1/quota/check \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-api-key" \
+  -d '{"userId": "user:alice", "estimatedInputTokens": 500}' | jq .
+```
+
+```json
+{
+  "allowed": true,
+  "remainingTokens": { "user": 999500, "org": 9999500 },
+  "exceededLevel": null,
+  "retryAfter": null
+}
+```
+
+**Step 8 — Scrape Prometheus metrics**
+
+```bash
+curl -s http://localhost:8080/metrics | head -20
+```
+
+Returns metrics in Prometheus text exposition format: `keyra_requests_total`, `keyra_dynamodb_latency_seconds`, `keyra_token_quota_total`, etc.
 
 ---
+
+## API Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/v1/ratelimit/check` | Yes | Check and consume rate limit tokens |
+| `GET` | `/v1/ratelimit/status/:key` | Yes | Get current bucket state for a key |
+| `POST` | `/v1/idempotency/check` | Yes | Check idempotency key (returns `new`, `in_progress`, `duplicate`, or `409 conflict`) |
+| `POST` | `/v1/idempotency/:key/complete` | Yes | Complete an idempotent operation with a stored response |
+| `POST` | `/v1/quota/check` | Yes | Pre-request token quota check (user/agent/org) |
+| `POST` | `/v1/quota/reconcile` | Yes | Post-LLM-call: reconcile estimated vs actual tokens |
+| `GET` | `/health` | No | Liveness probe (always 200 if process is alive) |
+| `GET` | `/ready` | No | Readiness probe (checks DynamoDB + Kinesis dependencies) |
+| `GET` | `/metrics` | No | Prometheus metrics scrape endpoint |
+| `GET` | `/v1/ratelimit/dashboard/stats` | No | SSE stream for live rate-limit events |
+
+See **[API Reference](docs/API.md)** for full request/response schemas.
 
 ## Infrastructure / Deploy
 
@@ -194,6 +254,7 @@ Terraform provisions the following AWS resources ([`terraform/`](terraform/)):
 |---|---|
 | **DynamoDB** `rate-limits` | Token-bucket state per key (OCC on version field) |
 | **DynamoDB** `idempotency` | Idempotency key storage with TTL auto-expiry |
+| **DynamoDB** `keyra-token-quotas` | Multi-level token quota counters (user/agent/org) |
 | **Kinesis** `rate-limit-events` | Rate-limit decision event stream |
 | **ECS Fargate** | Containerised app; autoscaling 2–10 tasks |
 | **ALB** | Application Load Balancer fronting ECS |
@@ -248,8 +309,8 @@ terraform output api_endpoint
 
 ## Documentation
 
-- **[API Reference](docs/API.md)** - Complete API documentation with examples
-- **[Architecture Decisions](docs/ARCHITECTURE.md)** - Design rationale and trade-offs
+- **[API Reference](docs/API.md)** — Complete API documentation with examples
+- **[Architecture Decisions](docs/ARCHITECTURE.md)** — Design rationale and trade-offs
 
 ## Configuration
 
@@ -268,6 +329,16 @@ Profiles set the burst cap (capacity) and steady-state throughput (refill rate) 
 
 Profile lookup is O(1) — profiles are stored as `Map[String, RateLimitProfile]` built at startup. Invalid profiles (capacity < 1, refillRate ≤ 0, empty name) cause a startup failure.
 
+### Token quota configuration
+
+Multi-level LLM token quotas are enforced simultaneously at user, agent, and org levels. Agent limit is validated at startup to not exceed 80% of user limit.
+
+| Level | Default limit | Window | Purpose |
+|---|---|---|---|
+| `user` | 1,000,000 tokens | 1 hour | Per-user hourly cap |
+| `agent` | 500,000 tokens | 1 hour | Per-agent cap (≤ 80% of user) |
+| `org` | 10,000,000 tokens | 24 hours | Org-wide daily cap |
+
 ### Key environment variable overrides
 
 | Env var | Config key | Default |
@@ -277,14 +348,24 @@ Profile lookup is O(1) — profiles are stored as `Map[String, RateLimitProfile]
 | `RATELIMIT_DEFAULT_REFILL_RATE` | `rate-limit.default-refill-rate-per-second` | `10.0` |
 | `IDEMPOTENCY_DEFAULT_TTL` | `idempotency.default-ttl-seconds` | `86400` (24 h) |
 | `IDEMPOTENCY_MAX_TTL_SECONDS` | `idempotency.max-ttl-seconds` | `86400` (24 h) |
+| `TOKEN_QUOTA_ENABLED` | `token-quota.enabled` | `false` |
+| `TOKEN_QUOTA_USER_LIMIT` | `token-quota.user-limit` | `1000000` |
+| `TOKEN_QUOTA_AGENT_LIMIT` | `token-quota.agent-limit` | `500000` |
+| `TOKEN_QUOTA_ORG_LIMIT` | `token-quota.org-limit` | `10000000` |
 | `KINESIS_ENABLED` | `kinesis.enabled` | `true` |
 | `KINESIS_QUEUE_SIZE` | `kinesis.queue-size` | `10000` |
 | `METRICS_ENABLED` | `metrics.enabled` | `true` |
 | `METRICS_MAX_BUFFER_SIZE` | `metrics.max-buffer-size` | `50000` |
 | `METRICS_FLUSH_THRESHOLD` | `metrics.flush-threshold` | `1000` |
+| `PROMETHEUS_ENABLED` | `prometheus.enabled` | `true` |
+| `TRACING_ENABLED` | `tracing.enabled` | `true` |
+| `OTEL_SERVICE_NAME` | `tracing.service-name` | `keyra` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `tracing.exporter-endpoint` | `http://localhost:4317` |
 | `AUTH_ENABLED` | `security.authentication.enabled` | `true` |
 | `CIRCUIT_BREAKER_ENABLED` | `resilience.circuit-breaker.enabled` | `true` |
 | `BULKHEAD_MAX_CONCURRENT` | `resilience.bulkhead.max-concurrent` | `100` |
+| `DEGRADATION_MODE` | `resilience.degradation-mode` | `reject-all` |
+| `STORAGE_BACKEND` | `storage.backend` | `dynamodb` |
 
 See [`application.conf`](src/main/resources/application.conf) for the complete reference.
 
@@ -330,9 +411,29 @@ Each failure is logged at `WARN` level so log-based alerts can be wired upstream
 
 ## Metrics
 
-Metrics are published to **CloudWatch** when deployed to AWS via [`MetricsPublisher`](src/main/scala/metrics/MetricsPublisher.scala).
+Metrics are dual-published to **CloudWatch** (AWS) and **Prometheus** (`GET /metrics`).
+
+### Prometheus endpoint
+
+`GET /metrics` returns all metrics in Prometheus text exposition format, scrapeable by Prometheus, Grafana Agent, or any OpenMetrics-compatible collector.
 
 ### Key metrics
+
+| Metric name | Type | Labels | Description |
+|---|---|---|---|
+| `keyra_requests_total` | Counter | `key`, `result` | Total rate limit requests (allowed/rejected) |
+| `keyra_idempotency_total` | Counter | `result` | Total idempotency checks |
+| `keyra_token_quota_total` | Counter | `level`, `result` | Token quota checks (available/exceeded) |
+| `keyra_tokens_consumed` | Gauge | `user`, `agent`, `org` | Current token consumption per entity |
+| `keyra_dynamodb_latency_seconds` | Histogram | `operation` | DynamoDB operation latency |
+| `keyra_rate_limit_check_seconds` | Histogram | — | End-to-end rate-limit check latency |
+| `keyra_idempotency_check_seconds` | Histogram | — | End-to-end idempotency check latency |
+| `keyra_token_quota_check_seconds` | Histogram | — | Token quota check latency |
+| `keyra_events_published_total` | Counter | `event_type` | Kinesis events published |
+| `keyra_events_dropped_total` | Counter | — | Events dropped after retry exhaustion |
+| `keyra_circuit_breaker_state` | Gauge | `name` | Circuit breaker state (0=closed, 0.5=half-open, 1=open) |
+
+### CloudWatch metrics
 
 | Metric name | Unit | Description |
 |---|---|---|
@@ -340,35 +441,55 @@ Metrics are published to **CloudWatch** when deployed to AWS via [`MetricsPublis
 | `RateLimitBlocked` | Count | Requests rejected (rate limit exceeded) |
 | `RateLimitOCCRetry` | Count | OCC conditional-write retries; high values indicate key contention |
 | `RateLimitLatency` | Milliseconds | End-to-end latency of a rate-limit check |
-| `DroppedKinesisEvent` | Count | Events dropped because the drain queue was full; indicates Kinesis back-pressure |
-| `CorruptStateRead` | Count | DynamoDB items with unparseable state; non-zero indicates data issues |
+| `DroppedKinesisEvent` | Count | Events dropped because the drain queue was full |
+| `CorruptStateRead` | Count | DynamoDB items with unparseable state |
 
 ### Flush behaviour
 
-Metrics are buffered in memory and flushed to CloudWatch:
+Metrics are buffered in an `immutable.Queue` and flushed to CloudWatch:
 - **Periodic:** every `metrics.flush-interval = 60s`
-- **Threshold:** when buffer reaches `metrics.flush-threshold = 1000` entries (async flush triggered immediately)
+- **Threshold:** when buffer reaches `metrics.flush-threshold = 1000` entries (async flush, CAS-guarded against stampede)
 - **Shutdown:** `Resource.onFinalize` flushes remaining entries before the process exits
 
-Buffer is capped at `metrics.max-buffer-size = 50000` entries; oldest entries are dropped when full (observable via `DroppedMetric` if added).
+Buffer is capped at `metrics.max-buffer-size = 50000` entries; oldest entries are dropped when full.
 
 ### CloudWatch namespace
 
 Default namespace: `RateLimiter`. Override with `METRICS_NAMESPACE`.
 
-### Prometheus / custom backends
+## Distributed Tracing
 
-To export to Prometheus or another system, implement the `MetricsPublisher[F]` interface and wire it in `Main.scala`. No other changes needed.
+OpenTelemetry tracing is integrated via [otel4s](https://typelevel.org/otel4s/). Spans are automatically created around rate-limit checks, idempotency checks, and token quota operations via `TracingMiddleware`.
+
+Trace IDs are propagated through Kinesis events for end-to-end audit correlation.
+
+**Configuration:**
+
+| Env var | Default | Description |
+|---|---|---|
+| `TRACING_ENABLED` | `true` | Enable/disable OTel tracing |
+| `OTEL_SERVICE_NAME` | `keyra` | Service name in traces |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP gRPC endpoint (Jaeger, Tempo, etc.) |
+
+To view traces locally, run Jaeger:
+
+```bash
+docker run -d --name jaeger \
+  -p 16686:16686 -p 4317:4317 \
+  jaegertracing/all-in-one:latest
+```
+
+Then open `http://localhost:16686` and search for service `keyra`.
 
 ## Features
 
 ### Rate Limiting
 
-- **Token Bucket Algorithm** - Default; allows burst up to capacity.
-- **Leaky Bucket Algorithm** - Optional; smooths output (steady drain), no large burst. Select via rate-limit.algorithm.
-- **Configurable Limits** - Per-user, per-API-key, per-endpoint limits.
-- **Low-latency design** - Token bucket and DynamoDB tuned for fast checks (AWS not yet tested).
-- **Horizontal Scaling** - Designed to scale with ECS and DynamoDB (AWS not yet tested).
+- **Token Bucket Algorithm** — Default; allows burst up to capacity.
+- **Leaky Bucket Algorithm** — Optional; smooths output (steady drain), no large burst. Select via `rate-limit.algorithm`.
+- **Configurable Limits** — Per-user, per-API-key, per-endpoint limits via named profiles.
+- **Standard Response Headers** — `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` on every allowed response.
+- **Resilience Stack** — Circuit breaker → bulkhead → retry → graceful degradation wrapping DynamoDB access.
 
 ### Rate limit algorithms
 
@@ -380,36 +501,59 @@ To export to Prometheus or another system, implement the `MetricsPublisher[F]` i
 | DynamoDB  | One item, OCC            | Same                |
 | Use case  | APIs that allow burst    | Strict smooth rate  |
 
-Set rate-limit.algorithm = "token-bucket" or "leaky-bucket" in configuration (or RATE_LIMIT_ALGORITHM env) to choose. Local development (localstack) uses in-memory store regardless of algorithm.
+Set `rate-limit.algorithm = "token-bucket"` or `"leaky-bucket"` in configuration (or `RATE_LIMIT_ALGORITHM` env).
 
 ### Idempotency
 
-- **First-Writer-Wins** - Atomic operations using DynamoDB conditional writes
-- **Response Caching** - Store and replay responses for duplicate requests
-- **TTL-Based Cleanup** - Automatic expiration of old keys
-- **Safe Retries** - Clients can safely retry failed requests
+- **First-Writer-Wins** — Atomic operations using DynamoDB conditional writes
+- **Request Fingerprinting** — SHA-256 hash of request body; same key + different body → `409 Conflict`
+- **TOCTOU Race Protection** — Retry loop (max 3 attempts) handles the edge case where a TTL-deleted record causes a false `New`
+- **Response Caching** — Store and replay responses for duplicate requests
+- **TTL-Based Cleanup** — Automatic expiration of old keys
+- **Safe Retries** — Clients can safely retry failed requests
 
 **Idempotency – schema and semantics**
 
 - **Key:** One item per key; partition key is `idempotency#<key>`. Consistent reads ensure up-to-date status.
 - **TTL:** Set at creation (`now + ttlSeconds`). DynamoDB TTL deletes expired items so the table does not grow without bound.
 - **First writer wins:** First successful create (no existing key, or status `Failed`) gets **New**; others get **InProgress** or **Duplicate** with stored response. Complete is conditional on `status = Pending`.
-- **Same request vs new:** Same key within TTL = retry/replay (InProgress or Duplicate). Different key or same key after TTL expiry = new request (New).
+- **Request fingerprinting:** A SHA-256 hash of the request body is stored with the key. If a duplicate check arrives with a different body hash, the service returns **KeyConflict** (409).
 - **Config:** Per-request TTL via `POST /v1/idempotency/check` body field `ttl`, or server default (e.g. 24h). Server enforces a maximum TTL (`idempotency.max-ttl-seconds` or `IDEMPOTENCY_MAX_TTL_SECONDS`); client-supplied TTL above that is capped.
+
+### Token Quotas (AI Workloads)
+
+Multi-level LLM token quota enforcement for AI infrastructure:
+
+- **Three levels** — User, agent, and org quotas enforced simultaneously per request.
+- **Pre-request estimation** — `POST /v1/quota/check` validates estimated token usage before calling the LLM.
+- **Post-response reconciliation** — `POST /v1/quota/reconcile` adjusts counters based on actual usage.
+- **Agent cap** — Agent limit is validated at startup to be ≤ 80% of user limit.
+- **Retry-After** — `429` responses include `Retry-After` header with seconds until the quota window resets.
+- **Metrics** — `keyra_tokens_consumed{user, agent, org}` gauge exported to Prometheus and CloudWatch.
+
+### Resilience
+
+The rate-limit store is wrapped with a layered resilience stack (configured via `application.conf`):
+
+| Layer | Default | Purpose |
+|---|---|---|
+| **Circuit Breaker** | 5 failures → open, 30s reset, 3 half-open calls | Stop cascading failures from DynamoDB outages |
+| **Bulkhead** | 100 concurrent, 500ms max wait | Limit concurrent DynamoDB calls |
+| **Retry** | 3 retries, 100ms base delay, 2× backoff, 10s max | Recover from transient failures |
+| **Graceful Degradation** | `reject-all` | Behaviour when circuit is open: `reject-all` (safe for fintech), `allow-all` (AI infra), or `use-cached` |
 
 ### Observability
 
-- **Structured Logging** - JSON logs with correlation IDs
-- **Health Endpoints** - `/health` and `/ready` endpoints for monitoring
-- **Custom Metrics** - CloudWatch metrics for rate limit decisions (when deployed to AWS, not yet tested)
-
-**Note:** Distributed tracing (X-Ray) and CloudWatch dashboards are planned but not yet implemented/tested.
+- **Structured Logging** — JSON logs with correlation IDs
+- **Prometheus Metrics** — `GET /metrics` endpoint with counters, gauges, and histograms
+- **CloudWatch Metrics** — Dual-publish to CloudWatch for AWS-native dashboards
+- **Distributed Tracing** — OpenTelemetry via otel4s; spans around all critical operations
+- **Health Endpoints** — `/health` (liveness) and `/ready` (readiness) probes
+- **Live Dashboard** — `GET /v1/ratelimit/dashboard/stats` streams rate-limit events via SSE
 
 ### Analytics
 
-- **Event Streaming** - Kinesis pipeline for real-time events (when enabled, AWS not yet tested)
-
-**Note:** S3 data lake, Athena queries, and analytics dashboards are planned but not yet implemented/tested.
+- **Event Streaming** — Kinesis pipeline for real-time events (rate-limit decisions, idempotency hits, quota exceeded, circuit breaker state changes)
 
 ## Technology Stack
 
@@ -421,16 +565,20 @@ Set rate-limit.algorithm = "token-bucket" or "leaky-bucket" in configuration (or
 - PureConfig 0.17.9 (configuration management)
 - Log4Cats 2.7.1 (structured logging)
 
+**Observability:**
+- Prometheus Client 0.16.0 (metrics exposition)
+- otel4s 0.15.2 + OpenTelemetry SDK 1.60.1 (distributed tracing)
+
 **AWS Services:**
 - ECS Fargate (container orchestration)
-- DynamoDB (NoSQL state storage)
+- DynamoDB (NoSQL state storage — 3 tables)
 - Kinesis (event streaming)
-- CloudWatch (observability)
+- CloudWatch (metrics & logs)
 - Application Load Balancer (traffic distribution)
-- S3 + Athena (analytics)
+- Secrets Manager (API key storage, optional)
 
 **Infrastructure:**
-- Terraform (DynamoDB, Kinesis, ECS Fargate, ALB; see [Infrastructure](#infrastructure))
+- Terraform (DynamoDB, Kinesis, ECS Fargate, ALB; see [Infrastructure](#infrastructure--deploy))
 - Docker (containerization)
 - LocalStack (local AWS emulation)
 
@@ -449,6 +597,7 @@ sbt run
 
 # Test endpoints
 curl http://localhost:8080/health
+curl http://localhost:8080/metrics
 curl -X POST http://localhost:8080/v1/ratelimit/check \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer test-api-key" \
@@ -549,7 +698,7 @@ The k6 thresholds intentionally fail under this scenario — they are tuned for 
 ✗ error rate<1% → actual 41.57%     (429s counted as failures by k6)
 ```
 
-To observe OCC retries in production: watch the `RateLimitOCCRetry` CloudWatch metric. A spike that coincides with latency spikes confirms the retry overhead as the source. This is the honest cost of distributed correctness without a lock service — the system stays **safe** (never over-issues) at the expense of throughput and tail latency under hot-key load.
+To observe OCC retries in production: watch the `RateLimitOCCRetry` CloudWatch metric or `keyra_requests_total{result="rejected"}` in Prometheus. A spike that coincides with latency spikes confirms the retry overhead as the source. This is the honest cost of distributed correctness without a lock service — the system stays **safe** (never over-issues) at the expense of throughput and tail latency under hot-key load.
 
 ---
 
@@ -580,7 +729,7 @@ The `InMemoryRateLimitStore` uses a `Ref[F, Map[String, BucketState]]` — no ne
 
 **Interpretation:** The DynamoDB store is ~50× slower at P50 on a single machine — all of that overhead is the distributed coordination cost (2 DynamoDB round-trips per check via LocalStack). For rate limiting, this is acceptable: a 49 ms P50 for a rate-limit check at the edge of your API is small relative to the business logic it protects. Against real DynamoDB in the same region (not LocalStack), expect 5–10 ms P50 instead.
 
-The in-memory store is useful for local development and unit tests where multi-instance correctness is not needed. The critical difference: if you run two instances with the in-memory store, each instance tracks its own token bucket independently — a client can double-consume by round-robin across instances. The DynamoDB store coordinates globally via a single DynamoDB item per key as the source of truth.
+The in-memory store is useful for local development and unit tests where multi-instance correctness is not needed. Select it with `STORAGE_BACKEND=in-memory`. The critical difference: if you run two instances with the in-memory store, each instance tracks its own token bucket independently — a client can double-consume by round-robin across instances. The DynamoDB store coordinates globally via a single DynamoDB item per key as the source of truth.
 
 ## Design Highlights
 
@@ -635,6 +784,21 @@ logger.info(
   )
 )
 ```
+
+## Roadmap
+
+Keyra is being built in 8 phases. Phases 1–4 are complete; Phase 5 is in progress.
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| **1. Core Hardening** | Done | Resilience stack wiring, bug fixes, DRY cleanup, test foundations |
+| **2. Idempotency Completeness** | Done | Request fingerprinting, TOCTOU race fix, 409 Conflict |
+| **3. Token Quotas** | Done | Multi-level LLM token quota enforcement (user/agent/org) |
+| **4. Prometheus & OpenTelemetry** | Done | Prometheus endpoint, dual-publish metrics, distributed tracing |
+| **5. Audit Trail & S3 Compliance** | In Progress | PCI DSS 4.0.1 audit events, Kinesis Firehose → S3 Parquet, 7-year retention |
+| **6. Sliding Window** | Planned | Third rate-limiting algorithm option |
+| **7. Client SDKs & Maven** | Planned | TypeScript + Python SDKs, http4s middleware, Maven Central |
+| **8. Managed SaaS** | Planned | DynamoDB Global Tables, RBAC, compliance dashboard, billing |
 
 ## Contributing
 
