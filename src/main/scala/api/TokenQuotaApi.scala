@@ -1,6 +1,7 @@
 package api
 
 import java.time.Instant
+import java.util.UUID  
 
 import org.http4s.*
 import org.http4s.circe.*
@@ -146,9 +147,27 @@ class TokenQuotaApi[F[_]: Async: Tracer](
           apiKey = client.apiKeyId,
           traceId = traceId,
         )
-        eventPublisher.publish(event).handleErrorWith(error =>
+        val auditEvent = RateLimitEvent.AuditEvent(
+          timestamp = timestamp,
+          requestId = UUID.randomUUID().toString,
+          apiKey = client.apiKeyId,
+          clientId = client.apiKeyId,
+          decision = "quota_exceeded",
+          reason = s"${level.prefix} quota exceeded: $used/$limit tokens",
+          endpoint = Some("/v1/quota/check"),
+          sourceIp = None,
+          tier = None,
+          traceId = traceId,
+        )
+        val publishMain = eventPublisher.publish(event).handleErrorWith(error =>
           logger.warn(s"Failed to publish token quota event: ${error.getMessage}"),
         )
+        val publishAudit =
+          logger.info(s"AUDIT decision=quota_exceeded user=${req.userId} level=${level.prefix} used=$used/$limit") *>
+            eventPublisher.publish(auditEvent).handleErrorWith(error =>
+              logger.warn(s"Failed to publish audit event: ${error.getMessage}"),
+            )
+        publishMain *> publishAudit
       case _ => Async[F].unit
 
 // Request/Response models

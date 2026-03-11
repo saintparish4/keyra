@@ -2,6 +2,7 @@ package api
 
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.UUID  
 
 import org.http4s.*
 import org.http4s.circe.*
@@ -225,9 +226,31 @@ class IdempotencyApi[F[_]: Async: Tracer](
             traceId = traceId,
           )
 
-    eventPublisher.publish(event).handleErrorWith(error =>
+    val publishMain = eventPublisher.publish(event).handleErrorWith(error =>
       logger.warn(s"Failed to publish idempotency event: ${error.getMessage}"),
     )
+
+    val publishAudit = result match
+      case IdempotencyResult.KeyConflict(key, _, _) =>
+        val auditEvent = RateLimitEvent.AuditEvent(
+          timestamp = timestamp,
+          requestId = UUID.randomUUID().toString,
+          apiKey = client.apiKeyId,
+          clientId = client.apiKeyId,
+          decision = "conflict",
+          reason = "Request hash mismatch on idempotency key",
+          endpoint = None,
+          sourceIp = None,
+          tier = None,
+          traceId = traceId,
+        )
+        logger.info(s"AUDIT decision=conflict client=${client.apiKeyId} idempotencyKey=$key") *>
+          eventPublisher.publish(auditEvent).handleErrorWith(error =>
+            logger.warn(s"Failed to publish audit event: ${error.getMessage}"),
+          )
+      case _ => Async[F].unit
+
+    publishMain *> publishAudit
 
 // Request/Response models
 case class IdempotencyCheckRequest(

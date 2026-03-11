@@ -181,6 +181,13 @@ case class StorageConfig(
     backend: String = "dynamodb", // "in-memory" | "dynamodb"
 ) derives ConfigReader
 
+/** Audit trail configuration for PCI DSS 4.0.1 compliance. */
+case class AuditConfig(
+    enabled: Boolean = true,
+    retentionYears: Int = 7,
+    s3Prefix: String = "audit/",
+) derives ConfigReader
+
 // Root application configuration
 case class AppConfig(
     server: ServerConfig,
@@ -199,6 +206,7 @@ case class AppConfig(
     ),
     resilience: ResilienceConfig = ResilienceConfig(),
     storage: StorageConfig = StorageConfig(),
+    audit: AuditConfig = AuditConfig(),
 ) derives ConfigReader
 
 object AppConfig:

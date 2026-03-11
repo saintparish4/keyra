@@ -17,3 +17,11 @@ output "s3_bucket_arn" {
 output "firehose_name" {
   value = var.enable_firehose ? aws_kinesis_firehose_delivery_stream.events[0].name : null
 }
+
+output "audit_firehose_name" {
+  value = var.enable_firehose && var.enable_audit_compliance ? aws_kinesis_firehose_delivery_stream.audit[0].name : null
+}
+
+output "glue_database_name" {
+  value = var.enable_firehose && var.enable_audit_compliance ? aws_glue_catalog_database.audit[0].name : null
+}

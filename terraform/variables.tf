@@ -85,6 +85,13 @@ variable "kinesis_s3_bucket" {
   default     = ""
 }
 
+# Audit trail (PCI DSS 4.0.1); used by kinesis module for S3/Glue/Firehose
+variable "enable_audit_compliance" {
+  description = "Enable PCI DSS 4.0.1 audit trail with 7-year S3 retention"
+  type        = bool
+  default     = false
+}
+
 # ECS
 variable "container_image" {
   description = "Docker container image"

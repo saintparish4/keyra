@@ -87,8 +87,9 @@ module "kinesis" {
   shard_count     = var.kinesis_shard_count
   retention_hours = var.kinesis_retention_hours
 
-  enable_firehose = var.enable_kinesis_firehose
-  s3_bucket_name  = var.kinesis_s3_bucket
+  enable_firehose         = var.enable_kinesis_firehose
+  s3_bucket_name          = var.kinesis_s3_bucket
+  enable_audit_compliance = var.enable_audit_compliance
 }
 
 # Secrets Manager

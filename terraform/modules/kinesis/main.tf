@@ -55,7 +55,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "events" {
   bucket = aws_s3_bucket.events[0].id
 
   rule {
-    id     = "archive"
+    id     = "general-events-archive"
     status = "Enabled"
 
     transition {
@@ -69,6 +69,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "events" {
 
     filter {
       prefix = "events/"
+    }
+  }
+
+  rule {
+    id     = "audit-compliance-retention"
+    status = var.enable_audit_compliance ? "Enabled" : "Disabled"
+
+    transition {
+      days          = var.audit_glacier_transition_days
+      storage_class = "DEEP_ARCHIVE"
+    }
+
+    expiration {
+      days = var.audit_retention_days
+    }
+
+    filter {
+      prefix = "audit/"
     }
   }
 }
@@ -128,6 +146,19 @@ resource "aws_iam_role_policy" "firehose" {
           "logs:PutLogEvents"
         ]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "glue:GetTable",
+          "glue:GetTableVersion",
+          "glue:GetTableVersions"
+        ]
+        Resource = [
+          "arn:aws:glue:*:*:catalog",
+          "arn:aws:glue:*:*:database/${var.project_name}_${var.environment}_audit",
+          "arn:aws:glue:*:*:table/${var.project_name}_${var.environment}_audit/*"
+        ]
       }
     ]
   })
@@ -165,6 +196,166 @@ resource "aws_kinesis_firehose_delivery_stream" "events" {
     Name    = "${var.project_name}-${var.environment}-events-firehose"
     Purpose = "Event delivery to S3"
   }
+}
+
+# Glue catalog for Parquet schema (required by Firehose data format conversion)
+resource "aws_glue_catalog_database" "audit" {
+  count = var.enable_firehose && var.enable_audit_compliance ? 1 : 0
+  name  = "${var.project_name}_${var.environment}_audit"
+}
+
+resource "aws_glue_catalog_table" "audit_events" {
+  count         = var.enable_firehose && var.enable_audit_compliance ? 1 : 0
+  name          = "audit_events"
+  database_name = aws_glue_catalog_database.audit[0].name
+
+  table_type = "EXTERNAL_TABLE"
+
+  parameters = {
+    classification = "parquet"
+  }
+
+  storage_descriptor {
+    location      = "s3://${aws_s3_bucket.events[0].id}/audit/"
+    input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+
+    ser_de_info {
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+      parameters = {
+        "serialization.format" = 1
+      }
+    }
+
+    columns {
+      name = "timestamp"
+      type = "string"
+    }
+
+    columns {
+      name = "event_type"
+      type = "string"
+    }
+
+    columns {
+      name = "request_id"
+      type = "string"
+    }
+
+    columns {
+      name = "api_key"
+      type = "string"
+    }
+
+    columns {
+      name = "client_id"
+      type = "string"
+    }
+
+    columns {
+      name = "decision"
+      type = "string"
+    }
+
+    columns {
+      name = "reason"
+      type = "string"
+    }
+
+    columns {
+      name = "endpoint"
+      type = "string"
+    }
+
+    columns {
+      name = "source_ip"
+      type = "string"
+    }
+
+    columns {
+      name = "tier"
+      type = "string"
+    }
+
+    columns {
+      name = "trace_id"
+      type = "string"
+    }
+  }
+
+  partition_keys {
+    name = "year"
+    type = "string"
+  }
+
+  partition_keys {
+    name = "month"
+    type = "string"
+  }
+
+  partition_keys {
+    name = "day"
+    type = "string"
+  }
+}
+
+# Kinesis Firehose for audit events -> S3 Parquet (PCI DSS 4.0.1)
+resource "aws_kinesis_firehose_delivery_stream" "audit" {
+  count       = var.enable_firehose && var.enable_audit_compliance ? 1 : 0
+  name        = "${var.project_name}-${var.environment}-audit-firehose"
+  destination = "extended_s3"
+
+  kinesis_source_configuration {
+    kinesis_stream_arn = aws_kinesis_stream.events.arn
+    role_arn           = aws_iam_role.firehose[0].arn
+  }
+
+  extended_s3_configuration {
+    role_arn   = aws_iam_role.firehose[0].arn
+    bucket_arn = aws_s3_bucket.events[0].arn
+    prefix     = "audit/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+
+    buffering_size     = 64  # MB — larger buffers = fewer Parquet files
+    buffering_interval = 300 # seconds
+
+    data_format_conversion_configuration {
+      input_format_configuration {
+        deserializer {
+          open_x_json_ser_de {}
+        }
+      }
+
+      output_format_configuration {
+        serializer {
+          parquet_ser_de {
+            compression = "SNAPPY"
+          }
+        }
+      }
+
+      schema_configuration {
+        database_name = aws_glue_catalog_database.audit[0].name
+        table_name    = aws_glue_catalog_table.audit_events[0].name
+        role_arn      = aws_iam_role.firehose[0].arn
+      }
+    }
+
+    cloudwatch_logging_options {
+      enabled         = true
+      log_group_name  = "/aws/firehose/${var.project_name}-${var.environment}"
+      log_stream_name = "audit"
+    }
+  }
+
+  tags = {
+    Name       = "${var.project_name}-${var.environment}-audit-firehose"
+    Purpose    = "PCI DSS 4.0.1 audit trail"
+    Compliance = "PCI-DSS-4.0.1"
+  }
+
+  depends_on = [
+    aws_glue_catalog_table.audit_events
+  ]
 }
 
 data "aws_caller_identity" "current" {}

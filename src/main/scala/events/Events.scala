@@ -111,6 +111,24 @@ object RateLimitEvent:
     val eventType = "token_quota_exceeded"
     val partitionKey = userId
 
+  /** Compliance audit event emitted for every denied/rejected/conflict decision.
+    * PCI DSS 4.0.1 requires 7-year retention of all access-denied events.
+    */
+  case class AuditEvent(
+      timestamp: Instant,
+      requestId: String,
+      apiKey: String,
+      clientId: String,
+      decision: String,
+      reason: String,
+      endpoint: Option[String],
+      sourceIp: Option[String],
+      tier: Option[String],
+      override val traceId: Option[String] = None,
+  ) extends RateLimitEvent:
+    val eventType = "audit"
+    val partitionKey = clientId
+
   // JSON encoder for events
   private def withMetadata(
       json: Json,
@@ -133,5 +151,6 @@ object RateLimitEvent:
       case e: CircuitBreakerStateChange => (e.asJson, e.eventType)
       case e: DegradedModeChange => (e.asJson, e.eventType)
       case e: TokenQuotaExceeded => (e.asJson, e.eventType)
+      case e: AuditEvent => (e.asJson, e.eventType)
     withMetadata(json, eventType, event.traceId)
   }

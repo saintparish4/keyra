@@ -25,3 +25,21 @@ variable "s3_bucket_name" {
   type    = string
   default = ""
 }
+
+variable "enable_audit_compliance" {
+  description = "Enable PCI DSS 4.0.1 audit trail with 7-year S3 retention"
+  type        = bool
+  default     = false
+}
+
+variable "audit_retention_days" {
+  description = "Number of days to retain audit events in S3 (2557 = 7 years)"
+  type        = number
+  default     = 2557
+}
+
+variable "audit_glacier_transition_days" {
+  description = "Days before audit events transition to Glacier Deep Archive"
+  type        = number
+  default     = 90
+}

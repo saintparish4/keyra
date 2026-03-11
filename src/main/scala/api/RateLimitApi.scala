@@ -1,6 +1,7 @@
 package api
 
 import java.time.Instant
+import java.util.UUID 
 
 import org.http4s.*
 import org.http4s.circe.*
@@ -198,9 +199,31 @@ class RateLimitApi[F[_]: Async: Tracer](
           traceId = traceId,
         )
 
-    eventPublisher.publish(event).handleErrorWith(error =>
+    val publishMain = eventPublisher.publish(event).handleErrorWith(error =>
       logger.warn(s"Failed to publish rate limit event: ${error.getMessage}"),
     )
+
+    val publishAudit = decision match
+      case RateLimitDecision.Rejected(_, _) =>
+        val auditEvent = RateLimitEvent.AuditEvent(
+          timestamp = timestamp,
+          requestId = UUID.randomUUID().toString,
+          apiKey = client.apiKeyId,
+          clientId = client.clientId,
+          decision = "rejected",
+          reason = "Rate limit exceeded",
+          endpoint = request.endpoint,
+          sourceIp = None,
+          tier = Some(client.tier.toString),
+          traceId = traceId,
+        )
+        logger.info(s"AUDIT decision=rejected client=${client.clientId} key=${request.key} tier=${client.tier}") *>
+          eventPublisher.publish(auditEvent).handleErrorWith(error =>
+            logger.warn(s"Failed to publish audit event: ${error.getMessage}"),
+          )
+      case _ => Async[F].unit
+
+    publishMain *> publishAudit
 
 // Request/Response models
 case class RateLimitCheckRequest(
