@@ -1,4 +1,4 @@
-package metrics
+package observability
 
 import java.io.StringWriter
 

@@ -19,7 +19,7 @@ import io.circe.generic.auto.*
 import io.circe.syntax.*
 import core.*
 import events.*
-import _root_.metrics.{MetricsPublisher, TracingMiddleware}
+import observability.{MetricsPublisher, TracingMiddleware}
 import security.*
 import config.RateLimitConfig
 

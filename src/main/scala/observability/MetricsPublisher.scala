@@ -1,4 +1,4 @@
-package metrics
+package observability
 
 import java.time.Instant
 
@@ -45,7 +45,7 @@ case class MetricDataPoint(
 /** Internal buffer state: Queue for O(1) enqueue/dequeue, separate size counter
   * to avoid O(n) Queue.size calls on every metric write.
   */
-private[metrics] case class BufferState(
+private[observability] case class BufferState(
     queue: Queue[MetricDataPoint] = Queue.empty,
     size: Int = 0,
 ):

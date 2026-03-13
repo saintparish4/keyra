@@ -13,7 +13,7 @@ import cats.syntax.all.*
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.*
 import core.{RateLimitDecision, RateLimitProfile, RateLimitStore}
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import resilience.{OCCConflictException, Retry, RetryPolicy}
 import DynamoDBOps.*
 

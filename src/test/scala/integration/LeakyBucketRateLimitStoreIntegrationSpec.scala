@@ -8,7 +8,7 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 import core.{RateLimitDecision, RateLimitProfile}
 import storage.LeakyBucketRateLimitStore
-import metrics.MetricsPublisher
+import observability.MetricsPublisher
 import cats.effect.IO
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*

@@ -16,7 +16,8 @@ import api.{
 }
 import config.{IdempotencyConfig, RateLimitConfig}
 import events.EventPublisher
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
+import resilience.AggregateHealth
 import security.{
   ApiKeyAuth, ApiKeyStore, AuthenticatedClient, ClientTier, Permission,
 }
@@ -106,6 +107,7 @@ class HttpApiIntegrationSpec
     dashboardApi,
     tokenQuotaApi = None,
     prometheusMetrics = None,
+    healthCheck = IO.pure(AggregateHealth("ok", Nil)),
   )
 
   lazy val httpApp: HttpApp[IO] = routes.httpApp

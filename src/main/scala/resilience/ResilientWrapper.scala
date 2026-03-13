@@ -13,7 +13,7 @@ import config.{
 import resilience.CircuitBreakerConfig
 import core.{RateLimitDecision, RateLimitProfile, RateLimitStore}
 import events.{EventPublisher, RateLimitEvent}
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 
 /** Resilient wrapper that applies production hardening patterns to the rate
   * limit store.

@@ -13,7 +13,7 @@ import org.typelevel.log4cats.Logger
 import config.IdempotencyConfig
 import core.*
 import events.EventPublisher
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import security.AuthenticatedClient
 import testutil.*
 import cats.effect.*

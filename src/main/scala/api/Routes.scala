@@ -19,7 +19,7 @@ import io.circe.generic.auto.*
 import io.circe.syntax.*
 import core.*
 import events.*
-import _root_.metrics.{MetricsPublisher, PrometheusMetrics, TracingMiddleware}
+import observability.{MetricsPublisher, PrometheusMetrics, TracingMiddleware}
 import resilience.AggregateHealth
 import security.*
 import config.{IdempotencyConfig, RateLimitConfig, TokenQuotaConfig}

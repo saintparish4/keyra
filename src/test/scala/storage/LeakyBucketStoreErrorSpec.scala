@@ -8,6 +8,7 @@ import scala.jdk.CollectionConverters.*
 import org.scalatest.freespec.AsyncFreeSpec
 import org.scalatest.matchers.should.Matchers
 
+import org.typelevel.log4cats.Logger
 import testutil.*
 import cats.effect.*
 import cats.effect.testing.scalatest.AsyncIOSpec

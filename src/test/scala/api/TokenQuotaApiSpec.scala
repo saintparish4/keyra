@@ -13,7 +13,7 @@ import io.circe.syntax.*
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.noop.NoOpLogger
 import core.*
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import events.EventPublisher
 import security.*
 

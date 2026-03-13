@@ -11,7 +11,7 @@ import cats.syntax.all.*
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.*
 import core.{TokenQuotaState, TokenQuotaStore}
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import DynamoDBOps.*
 
 /** DynamoDB-backed token quota store.

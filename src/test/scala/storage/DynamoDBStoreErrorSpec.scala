@@ -18,7 +18,7 @@ import org.typelevel.log4cats.noop.NoOpLogger
 import config.*
 import core.*
 import events.EventPublisher
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import resilience.*
 import security.{AuthenticatedClient, ClientTier, Permission}
 import api.IdempotencyApi
@@ -214,16 +214,15 @@ class DynamoDBStoreErrorSpec
       (for
         errorLogs <- Ref.of[IO, List[String]](Nil)
         metricNames <- Ref.of[IO, List[String]](Nil)
-        metrics = capturingMetrics(metricNames)
-        logger = capturingLogger(errorLogs)
-
-        store = DynamoDBRateLimitStore[IO](client, "test-table", logger, metrics)
+        metricsPublisher = capturingMetrics(metricNames)
+        given Logger[IO] = capturingLogger(errorLogs)
+        store = DynamoDBRateLimitStore[IO](client, "test-table", metricsPublisher)
         decision <- store.checkAndConsume(key, cost = 1, testProfile)
 
         logs <- errorLogs.get
-        metrics <- metricNames.get
-      yield (decision, logs, metrics)).asserting {
-        case (decision, logs, metrics) =>
+        recorded <- metricNames.get
+      yield (decision, logs, recorded)).asserting {
+        case (decision, logs, recorded) =>
           // 1. Fails open → request is allowed
           decision shouldBe a[RateLimitDecision.Allowed]
 
@@ -234,7 +233,7 @@ class DynamoDBStoreErrorSpec
             ) shouldBe true
 
           // 3. CorruptStateRead metric is incremented
-          metrics should contain("CorruptStateRead")
+          recorded should contain("CorruptStateRead")
       }
     }
   }

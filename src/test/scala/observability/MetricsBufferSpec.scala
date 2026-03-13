@@ -1,4 +1,4 @@
-package metrics
+package observability
 
 import cats.effect.*
 import cats.effect.testing.scalatest.AsyncIOSpec

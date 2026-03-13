@@ -13,7 +13,7 @@ package api
     import config.{RateLimitConfig, RateLimitProfileConfig}
     import core.*
     import events.EventPublisher
-    import _root_.metrics.MetricsPublisher
+    import observability.MetricsPublisher
     import testutil.*
 
     class RateLimitApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:

@@ -9,7 +9,7 @@ import cats.effect.testing.scalatest.AsyncIOSpec
 import org.scalatest.freespec.AsyncFreeSpec
 import org.scalatest.matchers.should.Matchers
 import config.TokenQuotaConfig
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.noop.NoOpLogger
 

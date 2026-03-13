@@ -1,4 +1,4 @@
-package metrics
+package observability
 
 import org.http4s.*
 import org.typelevel.otel4s.trace.{SpanKind, StatusCode, Tracer}

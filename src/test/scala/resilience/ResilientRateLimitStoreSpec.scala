@@ -12,7 +12,7 @@ package resilience
     import config.*
     import core.*
     import events.EventPublisher
-    import _root_.metrics.MetricsPublisher
+    import observability.MetricsPublisher
     import testutil.*
 
     class ResilientRateLimitStoreSpec

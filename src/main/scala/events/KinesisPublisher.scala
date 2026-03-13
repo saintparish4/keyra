@@ -13,7 +13,7 @@ import io.circe.syntax.*
 import software.amazon.awssdk.core.SdkBytes
 import software.amazon.awssdk.services.kinesis.KinesisAsyncClient
 import software.amazon.awssdk.services.kinesis.model.*
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 
 /** Kinesis-backed event publisher using a bounded circular-buffer queue and a
   * background drain fiber.

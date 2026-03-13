@@ -18,7 +18,7 @@ import events.{
   BroadcastingEventPublisher, EventPublisher, KinesisPublisher, RateLimitEvent,
 }
 import cats.effect.std.Queue
-import _root_.metrics.{MetricsPublisher, PrometheusMetrics, TracingMiddleware}
+import observability.{MetricsPublisher, PrometheusMetrics, TracingMiddleware}
 import resilience.*
 import security.*
 import storage.*
@@ -44,7 +44,7 @@ object Main extends IOApp:
       // max-buffer-size are wired from application.conf
       metricsPublisher <- config.metrics.enabled match
         case true =>
-          val metricsConfig = _root_.metrics.MetricsConfig(
+          val metricsConfig = observability.MetricsConfig(
             namespace = config.metrics.namespace,
             maxBufferSize = config.metrics.maxBufferSize,
             flushThreshold = config.metrics.flushThreshold,

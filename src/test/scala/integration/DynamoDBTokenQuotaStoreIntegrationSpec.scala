@@ -14,7 +14,7 @@ import software.amazon.awssdk.services.dynamodb.model.{
 
 import core.TokenQuotaState
 import storage.DynamoDBTokenQuotaStore
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import cats.effect.IO
 import cats.effect.testing.scalatest.AsyncIOSpec
 import cats.syntax.all.*

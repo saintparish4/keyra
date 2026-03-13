@@ -24,7 +24,7 @@ import org.typelevel.otel4s.trace.Tracer
 import config.*
 import core.*
 import events.*
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import security.*
 
 class AuditEventIntegrationSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:

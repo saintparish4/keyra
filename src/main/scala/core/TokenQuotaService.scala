@@ -8,7 +8,7 @@ import org.typelevel.log4cats.Logger
 
 import cats.effect.*
 import cats.syntax.all.*
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import config.TokenQuotaConfig
 
 sealed trait QuotaLevel:

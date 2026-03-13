@@ -20,7 +20,7 @@ import io.circe.syntax.*
 import config.IdempotencyConfig
 import core.*
 import events.*
-import _root_.metrics.{MetricsPublisher, TracingMiddleware}
+import observability.{MetricsPublisher, TracingMiddleware}
 import security.*
 
 /** Idempotency API endpoints.

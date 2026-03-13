@@ -14,7 +14,7 @@ import core.{
   RateLimitDecision, RateLimitProfile, RateLimitStore, TokenBucket,
   TokenBucketState,
 }
-import _root_.metrics.MetricsPublisher
+import observability.MetricsPublisher
 import resilience.{OCCConflictException, Retry, RetryPolicy}
 import DynamoDBOps.*
 

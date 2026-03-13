@@ -2,7 +2,7 @@ package object testutil:
 
     import cats.effect.*
     import org.typelevel.log4cats.Logger
-    import _root_.metrics.MetricsPublisher
+    import observability.MetricsPublisher
     import core.*
     import security.{AuthenticatedClient, ClientTier, Permission}
 
