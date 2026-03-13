@@ -39,6 +39,14 @@ object GracefulDegradation:
       logSampling: Int = 100, // Log 1 in N degraded requests
   )
 
+  /** Policy when a cache lookup misses (UseCached mode with no cached
+    * decision).
+    */
+  sealed trait CacheMissPolicy
+  object CacheMissPolicy:
+    case object AllowAll extends CacheMissPolicy
+    case object RejectAll extends CacheMissPolicy
+
   /** Execute with fallback behavior when the primary operation fails.
     *
     * @param primary
@@ -75,30 +83,73 @@ object GracefulDegradation:
     )
 
   /** Create a rate limit decision for degraded mode.
+    *
+    * UseCached: if `cache` is provided, looks up the key and returns the cached
+    * decision on hit; on miss (or no cache) uses `cacheMissPolicy`.
+    * ReducedLimit: if `reducedLimitState` is provided, tracks per-key
+    * per-window usage and allows up to tps per second; otherwise returns
+    * Allowed(tps, resetAt).
     */
   def degradedDecision[F[_]: Temporal](
       mode: DegradationMode,
       key: String,
+      cache: Option[LocalCache[F, String, core.RateLimitDecision]] = None,
+      cacheMissPolicy: CacheMissPolicy = CacheMissPolicy.AllowAll,
+      reducedLimitState: Option[Ref[F, Map[String, (Long, Int)]]] = None,
   ): F[core.RateLimitDecision] =
     import core.RateLimitDecision.*
 
-    Clock[F].realTime.map { now =>
-      val resetAt = java.time.Instant.ofEpochMilli(now.toMillis + 60000)
+    Clock[F].realTime.flatMap { now =>
+      val nowMs = now.toMillis
+      val resetAt = java.time.Instant.ofEpochMilli(nowMs + 60000)
 
       mode match
-        case DegradationMode.AllowAll =>
-          Allowed(tokensRemaining = 100, resetAt = resetAt)
+        case DegradationMode.AllowAll => Temporal[F]
+            .pure(Allowed(tokensRemaining = 100, resetAt = resetAt))
 
-        case DegradationMode.RejectAll =>
-          Rejected(retryAfterSeconds = 60, resetAt = resetAt)
+        case DegradationMode.RejectAll => Temporal[F]
+            .pure(Rejected(retryAfterSeconds = 60, resetAt = resetAt))
 
-        case DegradationMode.UseCached =>
-          // Caller should handle this case with actual cache lookup
-          Allowed(tokensRemaining = 50, resetAt = resetAt)
+        case DegradationMode.UseCached => cache match
+            case Some(c) => c.get(key).map {
+                case Some(decision) => decision
+                case None => cacheMissPolicy match
+                    case CacheMissPolicy.AllowAll =>
+                      Allowed(tokensRemaining = 100, resetAt = resetAt)
+                    case CacheMissPolicy.RejectAll =>
+                      Rejected(retryAfterSeconds = 60, resetAt = resetAt)
+              }
+            case None => Temporal[F].pure(
+                cacheMissPolicy match
+                  case CacheMissPolicy.AllowAll =>
+                    Allowed(tokensRemaining = 100, resetAt = resetAt)
+                  case CacheMissPolicy.RejectAll =>
+                    Rejected(retryAfterSeconds = 60, resetAt = resetAt),
+              )
 
-        case DegradationMode.ReducedLimit(tps) =>
-          // Simple in-memory tracking would go here
-          Allowed(tokensRemaining = tps, resetAt = resetAt)
+        case DegradationMode.ReducedLimit(tps) => reducedLimitState match
+            case Some(stateRef) =>
+              val windowStart = nowMs / 1000 * 1000 // floor to current second
+              stateRef.modify { map =>
+                val (ws, count) = map.getOrElse(key, (windowStart, 0))
+                if ws == windowStart then
+                  if count < tps then
+                    (
+                      map.updated(key, (windowStart, count + 1)),
+                      Allowed(
+                        tokensRemaining = tps - count - 1,
+                        resetAt = resetAt,
+                      ),
+                    )
+                  else (map, Rejected(retryAfterSeconds = 1, resetAt = resetAt))
+                else
+                  (
+                    map.updated(key, (windowStart, 1)),
+                    Allowed(tokensRemaining = tps - 1, resetAt = resetAt),
+                  )
+              }
+            case None => Temporal[F]
+                .pure(Allowed(tokensRemaining = tps, resetAt = resetAt))
     }
 
 /** Bulkhead pattern implementation for isolating failures.

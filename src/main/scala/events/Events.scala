@@ -111,8 +111,9 @@ object RateLimitEvent:
     val eventType = "token_quota_exceeded"
     val partitionKey = userId
 
-  /** Compliance audit event emitted for every denied/rejected/conflict decision.
-    * PCI DSS 4.0.1 requires 7-year retention of all access-denied events.
+  /** Compliance audit event emitted for every denied/rejected/conflict
+    * decision. PCI DSS 4.0.1 requires 7-year retention of all access-denied
+    * events.
     */
   case class AuditEvent(
       timestamp: Instant,
@@ -135,9 +136,7 @@ object RateLimitEvent:
       eventType: String,
       traceId: Option[String],
   ): Json =
-    val base = json.deepMerge(Json.obj(
-      "event_type" -> Json.fromString(eventType),
-    ))
+    val base = json.deepMerge(Json.obj("event_type" -> Json.fromString(eventType)))
     traceId.fold(base)(tid =>
       base.deepMerge(Json.obj("trace_id" -> Json.fromString(tid))),
     )

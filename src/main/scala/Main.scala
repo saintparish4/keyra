@@ -4,8 +4,8 @@ import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.server.Server
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.otel4s.oteljava.OtelJava
+import org.typelevel.otel4s.trace.Tracer
 
 import com.comcast.ip4s.*
 
@@ -18,8 +18,7 @@ import events.{
   BroadcastingEventPublisher, EventPublisher, KinesisPublisher, RateLimitEvent,
 }
 import cats.effect.std.Queue
-import _root_.metrics.MetricsPublisher
-import _root_.metrics.{PrometheusMetrics, TracingMiddleware}
+import _root_.metrics.{MetricsPublisher, PrometheusMetrics, TracingMiddleware}
 import resilience.*
 import security.*
 import storage.*
@@ -59,7 +58,8 @@ object Main extends IOApp:
       promMetrics <- config.prometheus.enabled match
         case true => Resource.eval(PrometheusMetrics[IO].map(Some(_)))
         case false => Resource.pure[IO, Option[PrometheusMetrics[IO]]](None)
-      _ <- Resource.eval(logger.info(s"Prometheus metrics: enabled=${config.prometheus.enabled}"))
+      _ <- Resource.eval(logger.info(s"Prometheus metrics: enabled=${config
+          .prometheus.enabled}"))
 
       // Wrap publisher for dual CloudWatch + Prometheus export
       metricsPublisher2 = promMetrics match
@@ -96,7 +96,6 @@ object Main extends IOApp:
                 store = LeakyBucketRateLimitStore[IO](
                   dynamoClient,
                   config.dynamodb.rateLimitTable,
-                  logger,
                   metricsPublisher2,
                 )
               yield store
@@ -107,7 +106,6 @@ object Main extends IOApp:
                 store = new DynamoDBRateLimitStore[IO](
                   dynamoClient,
                   config.dynamodb.rateLimitTable,
-                  logger,
                   metricsPublisher2,
                 )
               yield store
@@ -145,9 +143,9 @@ object Main extends IOApp:
             otelJava <- OtelJava.autoConfigured[IO]()
             tracer <- Resource.eval(otelJava.tracerProvider.get("keyra"))
           yield tracer
-        case false =>
-          Resource.pure[IO, Tracer[IO]](Tracer.noop[IO])
-      _ <- Resource.eval(logger.info(s"Tracing: enabled=${config.tracing.enabled}"))
+        case false => Resource.pure[IO, Tracer[IO]](Tracer.noop[IO])
+      _ <- Resource
+        .eval(logger.info(s"Tracing: enabled=${config.tracing.enabled}"))
 
       // Initialize token quota store + service (if enabled)
       tokenQuotaApi <- config.tokenQuota.enabled match
@@ -264,6 +262,16 @@ object Main extends IOApp:
       authMiddleware = ApiKeyAuth
         .middleware[IO](apiKeyStore, Some(authRateLimiter))
 
+      // Aggregate health for /ready: rate limit store, idempotency store, Kinesis
+      healthSources = List(
+        HealthAggregator
+          .dynamoDbSource("dynamodb_ratelimit", rateLimitStore.healthCheck),
+        HealthAggregator
+          .dynamoDbSource("dynamodb_idempotency", idempotencyStore.healthCheck),
+        HealthAggregator.kinesisSource(eventPublisher.healthCheck),
+      )
+      healthCheck = HealthAggregator.aggregate(healthSources)
+
       // Create HTTP routes (dashboard SSE receives events via dashboardQueue)
       routes <- Resource.eval(Routes[IO](
         rateLimitStore,
@@ -277,6 +285,7 @@ object Main extends IOApp:
         Some(dashboardQueue),
         tokenQuotaApi,
         promMetrics,
+        healthCheck,
       ))
       _ <- Resource.eval(logger.info("HTTP routes initialized"))
 

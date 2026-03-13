@@ -37,6 +37,7 @@ object ResilientRateLimitStore:
       eventPublisher: EventPublisher[F],
       degradationMode: GracefulDegradation.DegradationMode =
         GracefulDegradation.DegradationMode.AllowAll,
+      degradationCache: Option[LocalCache[F, String, RateLimitDecision]] = None,
   ): Resource[F, RateLimitStore[F]] =
     for
       // Create circuit breaker
@@ -68,6 +69,8 @@ object ResilientRateLimitStore:
 
       // Create health tracker
       healthTracker <- Resource.eval(HealthAwareService.tracker[F]())
+      reducedLimitRef <- Resource
+        .eval(Ref.of[F, Map[String, (Long, Int)]](Map.empty))
     yield new RateLimitStore[F]:
       private val logger = Logger[F]
 
@@ -157,20 +160,35 @@ object ResilientRateLimitStore:
           ) *> metrics.increment(
             "RateLimitDegraded",
             Map("reason" -> "circuit_breaker"),
-          ) *> GracefulDegradation.degradedDecision(degradationMode, key)
+          ) *> GracefulDegradation.degradedDecision(
+            degradationMode,
+            key,
+            cache = degradationCache,
+            reducedLimitState = Some(reducedLimitRef),
+          )
 
         case _: BulkheadRejected => logger.warn(
             s"Bulkhead rejected for key $key, applying degradation mode",
           ) *>
             metrics
               .increment("RateLimitDegraded", Map("reason" -> "bulkhead")) *>
-            GracefulDegradation.degradedDecision(degradationMode, key)
+            GracefulDegradation.degradedDecision(
+              degradationMode,
+              key,
+              cache = degradationCache,
+              reducedLimitState = Some(reducedLimitRef),
+            )
 
         case _ => logger.error(error)(
             s"Unexpected error for key $key, applying degradation mode",
           ) *>
             metrics.increment("RateLimitDegraded", Map("reason" -> "error")) *>
-            GracefulDegradation.degradedDecision(degradationMode, key)
+            GracefulDegradation.degradedDecision(
+              degradationMode,
+              key,
+              cache = degradationCache,
+              reducedLimitState = Some(reducedLimitRef),
+            )
 
       private def recordDecision(
           key: String,
@@ -201,56 +219,44 @@ object ResilientRateLimitStore:
         case _: java.io.IOException => true
         case _ => false
 
-/** Builder for creating resilient stores with fluent API.
+/** Immutable builder for creating resilient stores with fluent API.
   */
-class ResilientStoreBuilder[F[_]: Async: Logger](underlying: RateLimitStore[F]):
-  private var _config: Option[ResilienceConfig] = None
-  private var _metrics: Option[MetricsPublisher[F]] = None
-  private var _events: Option[EventPublisher[F]] = None
-  private var _degradationMode: GracefulDegradation.DegradationMode =
-    GracefulDegradation.DegradationMode.AllowAll
+case class ResilientStoreBuilder[F[_]: Async: Logger](
+    underlying: RateLimitStore[F],
+    config: ResilienceConfig = ResilientStoreBuilder.defaultConfig,
+    metrics: MetricsPublisher[F],
+    events: EventPublisher[F],
+    degradationMode: GracefulDegradation.DegradationMode =
+      GracefulDegradation.DegradationMode.AllowAll,
+):
+  def withConfig(c: ResilienceConfig): ResilientStoreBuilder[F] =
+    copy(config = c)
 
-  def withConfig(config: ResilienceConfig): ResilientStoreBuilder[F] =
-    _config = Some(config)
-    this
+  def withMetrics(m: MetricsPublisher[F]): ResilientStoreBuilder[F] =
+    copy(metrics = m)
 
-  def withMetrics(metrics: MetricsPublisher[F]): ResilientStoreBuilder[F] =
-    _metrics = Some(metrics)
-    this
-
-  def withEvents(events: EventPublisher[F]): ResilientStoreBuilder[F] =
-    _events = Some(events)
-    this
+  def withEvents(e: EventPublisher[F]): ResilientStoreBuilder[F] =
+    copy(events = e)
 
   def withDegradationMode(
       mode: GracefulDegradation.DegradationMode,
-  ): ResilientStoreBuilder[F] =
-    _degradationMode = mode
-    this
+  ): ResilientStoreBuilder[F] = copy(degradationMode = mode)
 
   def build: Resource[F, RateLimitStore[F]] =
-    val config = _config.getOrElse(defaultConfig)
+    ResilientRateLimitStore(underlying, config, metrics, events, degradationMode)
 
-    for
-      metrics <- _metrics match
-        case Some(m) => Resource.pure[F, MetricsPublisher[F]](m)
-        case None => Resource
-            .pure[F, MetricsPublisher[F]](MetricsPublisher.noop[F])
+object ResilientStoreBuilder:
+  def apply[F[_]: Async: Logger](
+      store: RateLimitStore[F],
+  ): ResilientStoreBuilder[F] = ResilientStoreBuilder[F](
+    underlying = store,
+    config = defaultConfig,
+    metrics = MetricsPublisher.noop[F],
+    events = EventPublisher.noop[F],
+    degradationMode = GracefulDegradation.DegradationMode.AllowAll,
+  )
 
-      events <- _events match
-        case Some(e) => Resource.pure[F, EventPublisher[F]](e)
-        case None => Resource.pure[F, EventPublisher[F]](EventPublisher.noop[F])
-
-      store <- ResilientRateLimitStore(
-        underlying,
-        config,
-        metrics,
-        events,
-        _degradationMode,
-      )
-    yield store
-
-  private def defaultConfig: ResilienceConfig =
+  private[resilience] def defaultConfig: ResilienceConfig =
     import config.*
     ResilienceConfig(
       circuitBreaker = CircuitBreakerSettings(
@@ -262,8 +268,3 @@ class ResilientStoreBuilder[F[_]: Async: Logger](underlying: RateLimitStore[F]):
       bulkhead = BulkheadSettings(),
       timeout = TimeoutSettings(),
     )
-
-object ResilientStoreBuilder:
-  def apply[F[_]: Async: Logger](
-      store: RateLimitStore[F],
-  ): ResilientStoreBuilder[F] = new ResilientStoreBuilder[F](store)

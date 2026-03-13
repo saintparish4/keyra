@@ -62,9 +62,8 @@ class LeakyBucketStoreErrorSpec
         errorLogs <- Ref.of[IO, List[String]](Nil)
         metricNames <- Ref.of[IO, List[String]](Nil)
         metrics = capturingMetrics(metricNames)
-        logger = capturingLogger(errorLogs)
-
-        store = LeakyBucketRateLimitStore[IO](client, "test-table", logger, metrics)
+        given Logger[IO] = capturingLogger(errorLogs)
+        store = LeakyBucketRateLimitStore[IO](client, "test-table", metrics)
         decision <- store.checkAndConsume(key, cost = 1, testProfile)
 
         logs <- errorLogs.get

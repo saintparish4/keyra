@@ -112,14 +112,25 @@ object MetricsPublisher:
       _ <-
         if config.enabled then
           Resource.make(
-            flushLoop(bufferRef, lastFlushRef, flushingRef, client, config).start,
+            flushLoop(bufferRef, lastFlushRef, flushingRef, client, config)
+              .start,
           )(fiber =>
-            fiber.cancel *>
-              doFlush(bufferRef, lastFlushRef, flushingRef, client, config, logger),
+            fiber.cancel *> doFlush(
+              bufferRef,
+              lastFlushRef,
+              flushingRef,
+              client,
+              config,
+              logger,
+            ),
           )
         else Resource.pure[F, Fiber[F, Throwable, Nothing]](null)
     yield new CloudWatchMetricsPublisher[F](
-      client, config, bufferRef, lastFlushRef, flushingRef,
+      client,
+      config,
+      bufferRef,
+      lastFlushRef,
+      flushingRef,
     )
 
   def cloudWatch[F[_]: Async: Logger](
@@ -188,7 +199,8 @@ object MetricsPublisher:
   ): F[Nothing] =
     val logger = Logger[F]
     (Async[F].sleep(config.flushInterval) *>
-      doFlush(bufferRef, lastFlushRef, flushingRef, client, config, logger)).foreverM
+      doFlush(bufferRef, lastFlushRef, flushingRef, client, config, logger))
+      .foreverM
 
   def doFlush[F[_]: Async](
       bufferRef: Ref[F, BufferState],
@@ -203,14 +215,15 @@ object MetricsPublisher:
     flushingRef.getAndSet(true).flatMap {
       case true => Async[F].unit // another flush is already running
       case false =>
-        val work = for
-          metrics <- bufferRef.modify(_.drainAll)
-          _ <-
-            if metrics.nonEmpty then
-              publishMetrics(client, config, metrics, logger) *>
-                lastFlushRef.set(System.currentTimeMillis())
-            else Async[F].unit
-        yield ()
+        val work =
+          for
+            metrics <- bufferRef.modify(_.drainAll)
+            _ <-
+              if metrics.nonEmpty then
+                publishMetrics(client, config, metrics, logger) *>
+                  lastFlushRef.set(System.currentTimeMillis())
+              else Async[F].unit
+          yield ()
         work.guarantee(flushingRef.set(false))
     }
 
@@ -332,14 +345,13 @@ private class CloudWatchMetricsPublisher[F[_]: Async: Logger](
         .flatMap(_ => triggerFlushIfNeeded)
     else Async[F].unit
 
-  private def triggerFlushIfNeeded: F[Unit] =
-    bufferRef.get.flatMap { buf =>
-      if buf.size >= config.flushThreshold then
-        MetricsPublisher
-          .doFlush(bufferRef, lastFlushRef, flushingRef, client, config, logger)
-          .start.void
-      else Async[F].unit
-    }
+  private def triggerFlushIfNeeded: F[Unit] = bufferRef.get.flatMap(buf =>
+    if buf.size >= config.flushThreshold then
+      MetricsPublisher
+        .doFlush(bufferRef, lastFlushRef, flushingRef, client, config, logger)
+        .start.void
+    else Async[F].unit,
+  )
 
   private def stateToValue(state: String): Double = state.toLowerCase match
     case "closed" => 0.0

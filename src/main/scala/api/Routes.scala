@@ -19,8 +19,8 @@ import io.circe.generic.auto.*
 import io.circe.syntax.*
 import core.*
 import events.*
-import _root_.metrics.MetricsPublisher
-import _root_.metrics.{PrometheusMetrics, TracingMiddleware}
+import _root_.metrics.{MetricsPublisher, PrometheusMetrics, TracingMiddleware}
+import resilience.AggregateHealth
 import security.*
 import config.{IdempotencyConfig, RateLimitConfig, TokenQuotaConfig}
 
@@ -44,6 +44,7 @@ class Routes[F[_]: Async: Tracer](
     dashboardApi: DashboardApi[F],
     tokenQuotaApi: Option[TokenQuotaApi[F]],
     prometheusMetrics: Option[PrometheusMetrics[F]],
+    healthCheck: F[AggregateHealth],
 ) extends Http4sDsl[F]:
 
   private val rateLimitApi = RateLimitApi[F](
@@ -69,48 +70,19 @@ class Routes[F[_]: Async: Tracer](
       Ok(HealthResponse("healthy", BuildInfo.version).asJson)
 
     // Prometheus metrics scrape endpoint
-    case GET -> Root / "metrics" =>
-      prometheusMetrics match
-        case Some(prom) =>
-          prom.scrape.flatMap(body =>
-            Ok(body).map(_.withContentType(
-              `Content-Type`(org.http4s.MediaType.text.plain),
-            )),
+    case GET -> Root / "metrics" => prometheusMetrics match
+        case Some(prom) => prom.scrape.flatMap(body =>
+            Ok(body).map(_.withContentType(`Content-Type`(
+              org.http4s.MediaType.text.plain,
+            ))),
           )
         case None => NotFound()
 
-    // Readiness probe - checks dependencies
-    case GET -> Root / "ready" =>
-      for
-        dynamoRlResult <- rateLimitStore.healthCheck
-          .handleError(e => Left(e.getMessage))
-        kinesisResult <- eventPublisher.healthCheck
-          .handleError(e => Left(e.getMessage))
-        dynamoIdResult <- idempotencyStore.healthCheck
-          .handleError(e => Left(e.getMessage))
-
-        failures = List(
-          dynamoRlResult.left.toOption.map(r => s"DynamoDB (rate-limit): $r"),
-          kinesisResult.left.toOption.map(r => s"Kinesis: $r"),
-          dynamoIdResult.left.toOption.map(r => s"DynamoDB (idempotency): $r"),
-        ).flatten
-
-        _ <- failures
-          .traverse_(reason => logger.warn(s"Readiness check failed: $reason"))
-
-        checks = Map(
-          "dynamodb_ratelimit" -> dynamoRlResult.isRight,
-          "dynamodb_idempotency" -> dynamoIdResult.isRight,
-          "kinesis" -> kinesisResult.isRight,
-        )
-
-        response <-
-          if failures.isEmpty then Ok(ReadyResponse("ready", checks).asJson)
-          else
-            ServiceUnavailable(
-              ReadyResponse("not ready", checks, Some(failures)).asJson,
-            )
-      yield response
+    // Readiness probe - aggregated dependency health
+    case GET -> Root / "ready" => healthCheck.flatMap { health =>
+        val json = health.asJson
+        if health.isHealthy then Ok(json) else ServiceUnavailable(json)
+      }
   }
 
   // Authenticated routes
@@ -176,6 +148,7 @@ object Routes:
       dashboardEventQueue: Option[Queue[F, RateLimitEvent]] = None,
       tokenQuotaApi: Option[TokenQuotaApi[F]] = None,
       prometheusMetrics: Option[PrometheusMetrics[F]] = None,
+      healthCheck: F[AggregateHealth],
   ): F[Routes[F]] =
     for
       dashboardApi <- DashboardApi.apply[F](
@@ -197,5 +170,6 @@ object Routes:
         dashboardApi,
         tokenQuotaApi,
         prometheusMetrics,
+        healthCheck,
       )
     yield routes

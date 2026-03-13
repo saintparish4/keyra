@@ -15,6 +15,7 @@ import core.{
   TokenBucketState,
 }
 import _root_.metrics.MetricsPublisher
+import resilience.{OCCConflictException, Retry, RetryPolicy}
 import DynamoDBOps.*
 
 /** DynamoDB implementation of RateLimitStore using token bucket algorithm.
@@ -49,60 +50,53 @@ import DynamoDBOps.*
   *   - version (N): Version for OCC
   *   - ttl (N): TTL for automatic cleanup
   */
-class DynamoDBRateLimitStore[F[_]: Async](
+class DynamoDBRateLimitStore[F[_]: Async: Logger](
     client: DynamoDbAsyncClient,
     tableName: String,
-    logger: Logger[F],
     metrics: MetricsPublisher[F],
+    retryPolicy: RetryPolicy = RetryPolicy.occRetry,
 ) extends RateLimitStore[F]:
 
-  private val MaxRetries = 10
+  private val logger = Logger[F]
 
   override def checkAndConsume(
       key: String,
       cost: Int,
       profile: RateLimitProfile,
-  ): F[RateLimitDecision] =
-    checkAndConsumeWithRetry(key, cost, profile, MaxRetries)
+  ): F[RateLimitDecision] = Retry
+    .retryWithTracking(retryPolicy, s"OCC-checkAndConsume($key)")(
+      singleAttempt(key, cost, profile),
+    ).flatMap(r =>
+      metrics.gauge("RateLimitOCCAttempts", r.attempts.toDouble).as(r.result),
+    ).handleErrorWith { case _: OCCConflictException =>
+      Clock[F].realTime.map(_.toMillis).map(now =>
+        RateLimitDecision.Rejected(1, TokenBucket.resetAt(now, 0, profile)),
+      )
+    }
 
-  private def checkAndConsumeWithRetry(
+  /** Single attempt: read state, refill, try consume+write. On OCC conflict
+    * (conditionalPut returns false), raise OCCConflictException so Retry
+    * handles backoff.
+    */
+  private def singleAttempt(
       key: String,
       cost: Int,
       profile: RateLimitProfile,
-      retriesRemaining: Int,
   ): F[RateLimitDecision] =
     for
       now <- Clock[F].realTime.map(_.toMillis)
-      currentState <- getOrInitState(key, profile, now)
-      refilled = TokenBucket.refill(currentState, now, profile)
-
+      current <- getOrInitState(key, profile, now)
+      refilled = TokenBucket.refill(current, now, profile)
       decision <- TokenBucket.consume(refilled, cost, now) match
-        case Some(newState) => attemptUpdate(
-            key,
-            currentState.version,
-            newState,
-            profile.ttlSeconds,
-            now,
-          ).flatMap {
-            case true =>
-              val resetAt = TokenBucket.resetAt(now, newState.tokens, profile)
-              Async[F]
-                .pure(RateLimitDecision.Allowed(newState.tokensInt, resetAt))
-            case false =>
-              // OCC conflict: retry with 1ms delay, max MaxRetries total; then reject (see class doc)
-              if retriesRemaining > 0 then
-                metrics.increment("RateLimitOCCRetry") *>
-                  Async[F].sleep(1.millis) *> checkAndConsumeWithRetry(
-                    key,
-                    cost,
-                    profile,
-                    retriesRemaining - 1,
-                  )
-              else
-                // High contention: reject after max retries to avoid over-issuing
-                val resetAt = TokenBucket.resetAt(now, refilled.tokens, profile)
-                Async[F].pure(RateLimitDecision.Rejected(1, resetAt))
-          }
+        case Some(newState) =>
+          attemptUpdate(key, current.version, newState, profile.ttlSeconds, now)
+            .flatMap {
+              case true =>
+                val resetAt = TokenBucket.resetAt(now, newState.tokens, profile)
+                Async[F]
+                  .pure(RateLimitDecision.Allowed(newState.tokensInt, resetAt))
+              case false => Async[F].raiseError(OCCConflictException(key, 0))
+            }
         case None =>
           val retryAfter = TokenBucket
             .retryAfterSeconds(cost, refilled.tokens, profile)
@@ -218,10 +212,10 @@ class DynamoDBRateLimitStore[F[_]: Async](
     conditionalPut(client, request)
 
 object DynamoDBRateLimitStore:
-  def apply[F[_]: Async](
+  def apply[F[_]: Async: Logger](
       client: DynamoDbAsyncClient,
       tableName: String,
-      logger: Logger[F],
       metrics: MetricsPublisher[F],
+      retryPolicy: RetryPolicy = RetryPolicy.occRetry,
   ): DynamoDBRateLimitStore[F] =
-    new DynamoDBRateLimitStore[F](client, tableName, logger, metrics)
+    new DynamoDBRateLimitStore[F](client, tableName, metrics, retryPolicy)

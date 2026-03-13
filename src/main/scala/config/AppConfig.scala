@@ -52,9 +52,7 @@ case class MetricsConfig(
     flushThreshold: Int = 1000,
 ) derives ConfigReader
 
-case class PrometheusConfig(
-    enabled: Boolean = true,
-) derives ConfigReader
+case class PrometheusConfig(enabled: Boolean = true) derives ConfigReader
 
 case class TracingConfig(
     enabled: Boolean = false,

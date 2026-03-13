@@ -3,8 +3,11 @@ package storage
 import scala.concurrent.duration.*
 import scala.jdk.FutureConverters.*
 
-import cats.effect.Async
+import org.typelevel.log4cats.Logger
+
+import cats.effect.{Async, Temporal}
 import cats.syntax.all.*
+import resilience.{OCCConflictException, Retry, RetryPolicy}
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.*
 
@@ -44,26 +47,34 @@ object DynamoDBOps:
     Async[F].delay(client.updateItem(request).toCompletableFuture),
   ).map(_ => true).recover { case _: ConditionalCheckFailedException => false }
 
-  /** OCC retry loop: run `attempt`, on false retry after `delay` up to
-    * `maxRetries` times. Returns the final result of `onSuccess` or
-    * `onExhaustion`.
+  /** OCC retry loop: run `attempt`, on false raise OCCConflictException so
+    * Retry engine handles backoff; on exhaustion after retries return
+    * `onExhaustion`. Delegates to Retry.withPolicy internally.
     */
-  def retryOnConditionFail[F[_]: Async, A](
+  def retryOnConditionFail[F[_]: Temporal: Logger, A](
       attempt: F[Boolean],
       maxRetries: Int,
       delay: FiniteDuration = 1.millis,
   )(onSuccess: F[A])(onExhaustion: F[A])(
       onRetry: Option[F[Unit]] = None,
   ): F[A] =
-    val retryAction = onRetry.getOrElse(Async[F].unit)
-    def loop(remaining: Int): F[A] = attempt.flatMap {
+    val policy = RetryPolicy(
+      maxRetries = maxRetries,
+      baseDelay = delay,
+      maxDelay = delay * 10,
+      multiplier = 1.0,
+      jitterFactor = 0.0,
+      retryOn = { case _: OCCConflictException => true; case _ => false },
+    )
+    val retryAction = onRetry.getOrElse(Temporal[F].unit)
+    val op: F[A] = attempt.flatMap {
       case true => onSuccess
-      case false =>
-        if remaining > 0 then
-          retryAction *> Async[F].sleep(delay) *> loop(remaining - 1)
-        else onExhaustion
+      case false => retryAction *>
+          Temporal[F].raiseError(OCCConflictException("condition-fail", 0))
     }
-    loop(maxRetries)
+    Retry.withPolicy(policy, "conditionalWrite")(op).handleErrorWith {
+      case _: OCCConflictException => onExhaustion
+    }
 
   /** Standard DynamoDB table health check via describeTable. */
   def dynamoHealthCheck[F[_]: Async](

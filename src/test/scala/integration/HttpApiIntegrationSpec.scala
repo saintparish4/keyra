@@ -56,7 +56,6 @@ class HttpApiIntegrationSpec
     new DynamoDBRateLimitStore[IO](
       dynamoDbClient,
       testDynamoDBConfig.rateLimitTable,
-      logger,
       MetricsPublisher.noop[IO],
     )
 

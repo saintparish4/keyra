@@ -2,7 +2,7 @@ package api
 
 import java.security.MessageDigest
 import java.time.Instant
-import java.util.UUID  
+import java.util.UUID
 
 import org.http4s.*
 import org.http4s.circe.*
@@ -10,6 +10,7 @@ import org.http4s.circe.CirceEntityDecoder.*
 import org.http4s.circe.CirceEntityEncoder.*
 import org.http4s.dsl.Http4sDsl
 import org.typelevel.log4cats.Logger
+import org.typelevel.otel4s.trace.Tracer
 
 import cats.effect.*
 import cats.effect.syntax.spawn.*
@@ -19,9 +20,7 @@ import io.circe.syntax.*
 import config.IdempotencyConfig
 import core.*
 import events.*
-import _root_.metrics.MetricsPublisher
-import _root_.metrics.TracingMiddleware
-import org.typelevel.otel4s.trace.Tracer
+import _root_.metrics.{MetricsPublisher, TracingMiddleware}
 import security.*
 
 /** Idempotency API endpoints.
@@ -60,9 +59,12 @@ class IdempotencyApi[F[_]: Async: Tracer](
       _ <- logger.debug(s"Idempotency check: key=${checkReq
           .idempotencyKey}, client=${client.apiKeyId}, hasHash=${requestHash
           .isDefined}")
-      result <- TracingMiddleware.traced("executeIdempotent") {
-        store.check(checkReq.idempotencyKey, client.apiKeyId, ttlSeconds, requestHash)
-      }
+      result <- TracingMiddleware.traced("executeIdempotent")(store.check(
+        checkReq.idempotencyKey,
+        client.apiKeyId,
+        ttlSeconds,
+        requestHash,
+      ))
 
       // Record metrics
       latency <- Clock[F].realTime.map(_.toMillis - startTime)
@@ -181,10 +183,8 @@ class IdempotencyApi[F[_]: Async: Tracer](
       .digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8))
     hash.map(b => "%02x".format(b)).mkString
 
-  private def currentTraceId: F[Option[String]] =
-    Tracer[F].currentSpanContext.map(
-      _.filter(_.isValid).map(_.traceIdHex),
-    )
+  private def currentTraceId: F[Option[String]] = Tracer[F].currentSpanContext
+    .map(_.filter(_.isValid).map(_.traceIdHex))
 
   private def publishEvent(
       result: IdempotencyResult,
@@ -244,7 +244,8 @@ class IdempotencyApi[F[_]: Async: Tracer](
           tier = None,
           traceId = traceId,
         )
-        logger.info(s"AUDIT decision=conflict client=${client.apiKeyId} idempotencyKey=$key") *>
+        logger.info(s"AUDIT decision=conflict client=${client
+            .apiKeyId} idempotencyKey=$key") *>
           eventPublisher.publish(auditEvent).handleErrorWith(error =>
             logger.warn(s"Failed to publish audit event: ${error.getMessage}"),
           )

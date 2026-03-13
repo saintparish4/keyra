@@ -198,8 +198,11 @@ object TokenQuotaService:
       )
       userCheck ++ agentCheck ++ orgCheck
 
-    private def quotaPk(level: QuotaLevel, id: String, windowSec: Long): String =
-      s"${level.prefix}:$id:${windowSec}s"
+    private def quotaPk(
+        level: QuotaLevel,
+        id: String,
+        windowSec: Long,
+    ): String = s"${level.prefix}:$id:${windowSec}s"
 
     private def isWithinWindow(
         windowStart: Long,

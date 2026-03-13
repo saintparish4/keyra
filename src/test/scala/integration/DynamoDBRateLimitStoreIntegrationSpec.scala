@@ -41,7 +41,6 @@ class DynamoDBRateLimitStoreIntegrationSpec
   lazy val store: DynamoDBRateLimitStore[IO] = new DynamoDBRateLimitStore[IO](
     dynamoDbClient,
     testDynamoDBConfig.rateLimitTable,
-    logger,
     MetricsPublisher.noop[IO],
   )
 

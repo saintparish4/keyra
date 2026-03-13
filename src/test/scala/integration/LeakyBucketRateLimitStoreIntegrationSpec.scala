@@ -41,7 +41,6 @@ class LeakyBucketRateLimitStoreIntegrationSpec
   lazy val store: LeakyBucketRateLimitStore[IO] = LeakyBucketRateLimitStore[IO](
     dynamoDbClient,
     testDynamoDBConfig.rateLimitTable,
-    logger,
     MetricsPublisher.noop[IO],
   )
 

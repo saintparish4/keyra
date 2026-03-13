@@ -8,6 +8,13 @@ import org.typelevel.log4cats.Logger
 import cats.effect.*
 import cats.syntax.all.*
 
+/** Raised when an optimistic concurrency control (OCC) write fails after
+  * exhausting retries (e.g. DynamoDB conditional write conflict). Callers
+  * typically map this to HTTP 409 Conflict.
+  */
+case class OCCConflictException(key: String, attempt: Int)
+    extends RuntimeException(s"OCC conflict on key=$key at attempt $attempt")
+
 /** Retry policy configuration with exponential backoff and jitter.
   *
   * The delay between retries follows: baseDelay * (multiplier ^ attempt) +
@@ -65,17 +72,28 @@ object RetryPolicy:
 
   /** Retry policy specifically for DynamoDB throttling */
   val dynamoDB: RetryPolicy = RetryPolicy(
-    maxRetries = 5,
+    maxRetries = 10,
     baseDelay = 25.millis,
     maxDelay = 3.seconds,
     multiplier = 2.0,
     jitterFactor = 0.2,
     retryOn = {
+      case _: OCCConflictException => true
       case _: software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException =>
         true
       case _: software.amazon.awssdk.core.exception.SdkServiceException => true
       case _ => false
     },
+  )
+
+  /** Retry policy for OCC (optimistic concurrency control) conflicts. */
+  val occRetry: RetryPolicy = RetryPolicy(
+    maxRetries = 10,
+    baseDelay = 1.millis,
+    maxDelay = 50.millis,
+    multiplier = 1.5,
+    jitterFactor = 0.2,
+    retryOn = { case _: OCCConflictException => true; case _ => false },
   )
 
   /** Retry policy for Kinesis throttling */

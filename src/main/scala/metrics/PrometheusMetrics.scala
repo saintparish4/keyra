@@ -2,11 +2,12 @@ package metrics
 
 import java.io.StringWriter
 
+import org.typelevel.log4cats.Logger
+
 import cats.effect.*
 import cats.syntax.all.*
 import io.prometheus.client.*
 import io.prometheus.client.exporter.common.TextFormat
-import org.typelevel.log4cats.Logger
 
 /** Prometheus metrics registry for Keyra
   *

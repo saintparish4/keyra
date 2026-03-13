@@ -13,8 +13,9 @@ import cats.syntax.all.*
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.*
 import core.{RateLimitDecision, RateLimitProfile, RateLimitStore}
-import DynamoDBOps.*
 import _root_.metrics.MetricsPublisher
+import resilience.{OCCConflictException, Retry, RetryPolicy}
+import DynamoDBOps.*
 
 /** DynamoDB implementation of RateLimitStore using leaky bucket algorithm.
   *
@@ -28,27 +29,38 @@ import _root_.metrics.MetricsPublisher
   * refillRatePerSecond = leak rate. DynamoDB: Same schema as token bucket (pk,
   * tokens→level, lastRefillMs→lastLeakMs, version, ttl); OCC.
   */
-class LeakyBucketRateLimitStore[F[_]: Async](
+class LeakyBucketRateLimitStore[F[_]: Async: Logger](
     client: DynamoDbAsyncClient,
     tableName: String,
-    logger: Logger[F],
     metrics: MetricsPublisher[F],
+    retryPolicy: RetryPolicy = RetryPolicy.occRetry,
 ) extends RateLimitStore[F]:
 
-  private val MaxRetries = 10
+  private val logger = Logger[F]
 
   override def checkAndConsume(
       key: String,
       cost: Int,
       profile: RateLimitProfile,
-  ): F[RateLimitDecision] =
-    checkAndConsumeWithRetry(key, cost, profile, MaxRetries)
+  ): F[RateLimitDecision] = Retry
+    .retryWithTracking(retryPolicy, s"OCC-leaky($key)")(
+      singleAttempt(key, cost, profile),
+    ).map(_.result).handleErrorWith { case _: OCCConflictException =>
+      Clock[F].realTime.map(_.toMillis).map { now =>
+        val secToAllow = cost.toDouble / profile.refillRatePerSecond
+        val resetAt = Instant.ofEpochMilli(now + (secToAllow * 1000).toLong)
+        RateLimitDecision.Rejected(secToAllow.ceil.toInt.max(1), resetAt)
+      }
+    }
 
-  private def checkAndConsumeWithRetry(
+  /** Single attempt: one read-compute-write cycle. On OCC conflict
+    * (conditionalPut returns false), raise OCCConflictException so Retry
+    * handles backoff.
+    */
+  private def singleAttempt(
       key: String,
       cost: Int,
       profile: RateLimitProfile,
-      retriesRemaining: Int,
   ): F[RateLimitDecision] =
     for
       now <- Clock[F].realTime.map(_.toMillis)
@@ -76,23 +88,7 @@ class LeakyBucketRateLimitStore[F[_]: Async](
                 RateLimitDecision
                   .Allowed((profile.capacity - updatedLevel).toInt, resetAt),
               )
-            case false =>
-              if retriesRemaining > 0 then
-                Async[F].sleep(1.millis) *> checkAndConsumeWithRetry(
-                  key,
-                  cost,
-                  profile,
-                  retriesRemaining - 1,
-                )
-              else
-                val secToAllow = (newLevel + cost - profile.capacity) /
-                  profile.refillRatePerSecond
-                val resetAt = Instant
-                  .ofEpochMilli(now + (secToAllow * 1000).toLong)
-                Async[F].pure(
-                  RateLimitDecision
-                    .Rejected(secToAllow.ceil.toInt.max(1), resetAt),
-                )
+            case false => Async[F].raiseError(OCCConflictException(key, 0))
           }
         else
           val secToAllow =
@@ -212,10 +208,10 @@ class LeakyBucketRateLimitStore[F[_]: Async](
   )
 
 object LeakyBucketRateLimitStore:
-  def apply[F[_]: Async](
+  def apply[F[_]: Async: Logger](
       client: DynamoDbAsyncClient,
       tableName: String,
-      logger: Logger[F],
       metrics: MetricsPublisher[F],
+      retryPolicy: RetryPolicy = RetryPolicy.occRetry,
   ): LeakyBucketRateLimitStore[F] =
-    new LeakyBucketRateLimitStore[F](client, tableName, logger, metrics)
+    new LeakyBucketRateLimitStore[F](client, tableName, metrics, retryPolicy)

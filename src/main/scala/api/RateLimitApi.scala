@@ -1,7 +1,7 @@
 package api
 
 import java.time.Instant
-import java.util.UUID 
+import java.util.UUID
 
 import org.http4s.*
 import org.http4s.circe.*
@@ -10,6 +10,7 @@ import org.http4s.circe.CirceEntityEncoder.*
 import org.http4s.dsl.Http4sDsl
 import org.typelevel.ci.*
 import org.typelevel.log4cats.Logger
+import org.typelevel.otel4s.trace.Tracer
 
 import cats.effect.*
 import cats.effect.syntax.spawn.*
@@ -18,9 +19,7 @@ import io.circe.generic.auto.*
 import io.circe.syntax.*
 import core.*
 import events.*
-import _root_.metrics.MetricsPublisher
-import _root_.metrics.TracingMiddleware
-import org.typelevel.otel4s.trace.Tracer
+import _root_.metrics.{MetricsPublisher, TracingMiddleware}
 import security.*
 import config.RateLimitConfig
 
@@ -58,9 +57,9 @@ class RateLimitApi[F[_]: Async: Tracer](
             // Perform rate limit check
             _ <- logger.debug(s"Rate limit check: key=${checkReq
                 .key}, cost=${checkReq.cost}, tier=${client.tier}")
-            decision <- TracingMiddleware.traced("checkAndConsume") {
-              store.checkAndConsume(checkReq.key, checkReq.cost, profile)
-            }
+            decision <- TracingMiddleware.traced("checkAndConsume")(
+              store.checkAndConsume(checkReq.key, checkReq.cost, profile),
+            )
 
             // Record metrics
             latency <- Clock[F].realTime.map(_.toMillis - startTime)
@@ -164,10 +163,8 @@ class RateLimitApi[F[_]: Async: Tracer](
         ).asJson,
       ).map(_.putHeaders(Header.Raw(ci"Retry-After", retryAfter.toString)))
 
-  private def currentTraceId: F[Option[String]] =
-    Tracer[F].currentSpanContext.map(
-      _.filter(_.isValid).map(_.traceIdHex),
-    )
+  private def currentTraceId: F[Option[String]] = Tracer[F].currentSpanContext
+    .map(_.filter(_.isValid).map(_.traceIdHex))
 
   private def publishEvent(
       decision: RateLimitDecision,
@@ -217,7 +214,8 @@ class RateLimitApi[F[_]: Async: Tracer](
           tier = Some(client.tier.toString),
           traceId = traceId,
         )
-        logger.info(s"AUDIT decision=rejected client=${client.clientId} key=${request.key} tier=${client.tier}") *>
+        logger.info(s"AUDIT decision=rejected client=${client
+            .clientId} key=${request.key} tier=${client.tier}") *>
           eventPublisher.publish(auditEvent).handleErrorWith(error =>
             logger.warn(s"Failed to publish audit event: ${error.getMessage}"),
           )

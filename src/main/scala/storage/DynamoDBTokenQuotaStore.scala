@@ -4,9 +4,10 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.jdk.FutureConverters.*
 
+import org.typelevel.log4cats.Logger
+
 import cats.effect.*
 import cats.syntax.all.*
-import org.typelevel.log4cats.Logger
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.*
 import core.{TokenQuotaState, TokenQuotaStore}
@@ -36,22 +37,19 @@ class DynamoDBTokenQuotaStore[F[_]: Async](
 
   override def getQuota(pk: String): F[Option[TokenQuotaState]] =
     val request = GetItemRequest.builder().tableName(tableName)
-      .key(Map("pk" -> attr(pk)).asJava)
-      .consistentRead(true)
-      .build()
+      .key(Map("pk" -> attr(pk)).asJava).consistentRead(true).build()
 
     Async[F].fromCompletableFuture(
       Async[F].delay(client.getItem(request).toCompletableFuture),
-    ).flatMap { response =>
+    ).flatMap(response =>
       if response.hasItem && !response.item().isEmpty then
         parseState(response.item().asScala.toMap) match
           case Right(state) => Async[F].pure(Some(state))
-          case Left(err) =>
-            logger.error(s"Corrupt token quota state for pk=$pk: $err") *>
-              metrics.increment("CorruptStateRead") *>
-              Async[F].pure(None)
-      else Async[F].pure(None)
-    }
+          case Left(err) => logger
+              .error(s"Corrupt token quota state for pk=$pk: $err") *>
+              metrics.increment("CorruptStateRead") *> Async[F].pure(None)
+      else Async[F].pure(None),
+    )
 
   override def incrementQuota(
       pk: String,
@@ -59,8 +57,14 @@ class DynamoDBTokenQuotaStore[F[_]: Async](
       outputTokensDelta: Long,
       windowSeconds: Long,
       nowMs: Long,
-  ): F[Boolean] =
-    incrementWithRetry(pk, inputTokensDelta, outputTokensDelta, windowSeconds, nowMs, MaxRetries)
+  ): F[Boolean] = incrementWithRetry(
+    pk,
+    inputTokensDelta,
+    outputTokensDelta,
+    windowSeconds,
+    nowMs,
+    MaxRetries,
+  )
 
   override def healthCheck: F[Either[String, Unit]] =
     dynamoHealthCheck(client, tableName)
@@ -76,21 +80,35 @@ class DynamoDBTokenQuotaStore[F[_]: Async](
     for
       current <- getQuota(pk)
       result <- current match
-        case Some(state) if isWithinWindow(state.windowStart, nowMs, windowSec) =>
+        case Some(state)
+            if isWithinWindow(state.windowStart, nowMs, windowSec) =>
           val newInput = math.max(0, state.inputTokens + inputDelta)
           val newOutput = math.max(0, state.outputTokens + outputDelta)
           val newVersion = state.version + 1
           val ttl = nowMs / 1000 + windowSec + 60 // window + 60s grace
 
           attemptConditionalUpdate(
-            pk, newInput, newOutput, state.windowStart, newVersion, state.version, ttl,
-          )          .flatMap {
+            pk,
+            newInput,
+            newOutput,
+            state.windowStart,
+            newVersion,
+            state.version,
+            ttl,
+          ).flatMap {
             case true => Async[F].pure(true)
             case false =>
               if retriesRemaining > 0 then
                 metrics.increment("TokenQuotaOCCRetry") *>
                   jitteredBackoff(MaxRetries - retriesRemaining) *>
-                  incrementWithRetry(pk, inputDelta, outputDelta, windowSec, nowMs, retriesRemaining - 1)
+                  incrementWithRetry(
+                    pk,
+                    inputDelta,
+                    outputDelta,
+                    windowSec,
+                    nowMs,
+                    retriesRemaining - 1,
+                  )
               else
                 logger.warn(s"OCC retries exhausted for token quota pk=$pk") *>
                   Async[F].pure(false)
@@ -107,9 +125,17 @@ class DynamoDBTokenQuotaStore[F[_]: Async](
               if retriesRemaining > 0 then
                 metrics.increment("TokenQuotaOCCRetry") *>
                   jitteredBackoff(MaxRetries - retriesRemaining) *>
-                  incrementWithRetry(pk, inputDelta, outputDelta, windowSec, nowMs, retriesRemaining - 1)
+                  incrementWithRetry(
+                    pk,
+                    inputDelta,
+                    outputDelta,
+                    windowSec,
+                    nowMs,
+                    retriesRemaining - 1,
+                  )
               else
-                logger.warn(s"OCC retries exhausted for new token quota pk=$pk") *>
+                logger
+                  .warn(s"OCC retries exhausted for new token quota pk=$pk") *>
                   Async[F].pure(false)
           }
     yield result
@@ -136,8 +162,7 @@ class DynamoDBTokenQuotaStore[F[_]: Async](
       "version" -> attrN(newVersion),
       "ttl" -> attrN(ttl),
     )
-    val request = PutItemRequest.builder().tableName(tableName)
-      .item(item.asJava)
+    val request = PutItemRequest.builder().tableName(tableName).item(item.asJava)
       .conditionExpression("version = :expectedVersion")
       .expressionAttributeValues(
         Map(":expectedVersion" -> attrN(expectedVersion)).asJava,
@@ -160,10 +185,8 @@ class DynamoDBTokenQuotaStore[F[_]: Async](
       "version" -> attrN(1L),
       "ttl" -> attrN(ttl),
     )
-    val request = PutItemRequest.builder().tableName(tableName)
-      .item(item.asJava)
-      .conditionExpression("attribute_not_exists(pk)")
-      .build()
+    val request = PutItemRequest.builder().tableName(tableName).item(item.asJava)
+      .conditionExpression("attribute_not_exists(pk)").build()
 
     conditionalPut(client, request)
 
@@ -177,8 +200,8 @@ class DynamoDBTokenQuotaStore[F[_]: Async](
         .toRight("missing 'output_tokens'").map(_.n().toLong)
       val windowStart = item.get("window_start")
         .toRight("missing 'window_start'").map(_.n().toLong)
-      val version = item.get("version")
-        .toRight("missing 'version'").map(_.n().toLong)
+      val version = item.get("version").toRight("missing 'version'")
+        .map(_.n().toLong)
       for
         i <- inputTokens
         o <- outputTokens
@@ -189,8 +212,11 @@ class DynamoDBTokenQuotaStore[F[_]: Async](
       case e: NumberFormatException =>
         Left(s"malformed numeric attribute: ${e.getMessage}")
 
-  private def isWithinWindow(windowStart: Long, nowMs: Long, windowSec: Long): Boolean =
-    (nowMs - windowStart) < (windowSec * 1000)
+  private def isWithinWindow(
+      windowStart: Long,
+      nowMs: Long,
+      windowSec: Long,
+  ): Boolean = nowMs - windowStart < windowSec * 1000
 
 object DynamoDBTokenQuotaStore:
   def apply[F[_]: Async](
