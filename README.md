@@ -311,6 +311,12 @@ terraform output api_endpoint
 
 - **[API Reference](docs/API.md)** — Complete API documentation with examples
 - **[Architecture Decisions](docs/ARCHITECTURE.md)** — Design rationale and trade-offs
+- **[Operational Runbook](docs/RUNBOOK.md)** — Troubleshooting circuit breaker, OCC exhaustion, idempotency issues, LocalStack
+- **[Architecture Decision Records](docs/adr/)** — ADRs documenting key trade-offs:
+  - [ADR-001: DynamoDB over Redis](docs/adr/001-dynamodb-over-redis.md)
+  - [ADR-002: Hand-rolled circuit breaker](docs/adr/002-hand-rolled-circuit-breaker.md)
+  - [ADR-003: Fire-and-forget event publishing](docs/adr/003-fire-and-forget-event-publishing.md)
+  - [ADR-004: OCC vs pessimistic locking](docs/adr/004-occ-over-pessimistic-locking.md)
 
 ## Configuration
 
@@ -795,7 +801,7 @@ Keyra is being built in 8 phases. Phases 1–4 are complete; Phase 5 is in progr
 | **2. Idempotency Completeness** | Done | Request fingerprinting, TOCTOU race fix, 409 Conflict |
 | **3. Token Quotas** | Done | Multi-level LLM token quota enforcement (user/agent/org) |
 | **4. Prometheus & OpenTelemetry** | Done | Prometheus endpoint, dual-publish metrics, distributed tracing |
-| **5. Audit Trail & S3 Compliance** | In Progress | PCI DSS 4.0.1 audit events, Kinesis Firehose → S3 Parquet, 7-year retention |
+| **5. Audit Trail & S3 Compliance** | Partial | PCI DSS 4.0.1 audit events to Kinesis + structured logs. S3 archival via Firehose defined in Terraform but not yet deployed. |
 | **6. Sliding Window** | Planned | Third rate-limiting algorithm option |
 | **7. Client SDKs & Maven** | Planned | TypeScript + Python SDKs, http4s middleware, Maven Central |
 | **8. Managed SaaS** | Planned | DynamoDB Global Tables, RBAC, compliance dashboard, billing |

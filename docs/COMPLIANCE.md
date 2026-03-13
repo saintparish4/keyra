@@ -7,8 +7,11 @@ exceeded) produces an `AuditEvent` that is:
 
 1. Logged as a structured INFO line (for CloudWatch Logs / stdout)
 2. Published to Kinesis as a JSON event (partition key = clientId)
-3. Delivered to S3 via Kinesis Firehose in Parquet format (Snappy compressed)
-4. Retained for 7 years in S3 (90 days Standard -> Deep Archive until expiry)
+
+**Planned but not yet implemented:**
+
+3. S3 archival via Kinesis Firehose in Parquet format (Snappy compressed). Terraform modules exist (`terraform/modules/kinesis/main.tf`, gated behind `enable_kinesis_firehose` and `enable_audit_compliance` flags) but the pipeline has not been deployed or validated end-to-end.
+4. 7-year retention in S3 (90 days Standard → Deep Archive until expiry). The S3 lifecycle configuration is defined in Terraform but has not been activated.
 
 ### Audit Event Schema
 
@@ -26,21 +29,33 @@ exceeded) produces an `AuditEvent` that is:
 | tier        | string (opt)    | Client tier (free/basic/premium/etc)      |
 | trace_id    | string (opt)    | OpenTelemetry trace ID for correlation    |
 
-### S3 Partitioning
+### S3 Partitioning (Planned)
+
+The Terraform configuration defines the following S3 layout for when Firehose delivery is enabled:
 
 ```
 s3://bucket/audit/year=2026/month=03/day=09/part-00000.snappy.parquet
 ```
 
-### Acceptance Criteria
+This is not currently active. To enable, set `enable_kinesis_firehose = true` and `enable_audit_compliance = true` in Terraform variables, and deploy.
 
-- Every 429 response produces an audit event within 1 second
-- S3 export delivers Parquet files within 5 minutes (Firehose buffer interval)
-- Audit records are queryable via Athena using the Glue catalog table
-- 7-year retention enforced by S3 lifecycle (2557 days)
-- Events transition to Deep Archive after 90 days
+### What Works Today
+
+- Every 429 response produces an audit event published to Kinesis within 1 second
+- Audit events are logged as structured INFO lines to stdout (CloudWatch Logs when deployed)
+- Events include all schema fields above for post-hoc querying
+
+### What Does Not Work Yet
+
+- S3 export via Kinesis Firehose (Terraform exists, not deployed)
+- Parquet format conversion via Glue catalog (Terraform exists, not deployed)
+- Athena queryability over S3 data
+- 7-year S3 retention lifecycle enforcement
+- Deep Archive transition after 90 days
 
 ## CloudWatch Insights Queries
+
+These queries work against CloudWatch Logs (structured log output). They do **not** require the S3/Firehose/Athena pipeline.
 
 ### All denied requests in the last 24 hours
 
@@ -106,11 +121,11 @@ fields @timestamp, decision
 
 ## PCI DSS 4.0.1 Evidence
 
-| Requirement | Control                          | Evidence                         |
-|-------------|----------------------------------|----------------------------------|
-| 10.2.2     | Log all access to cardholder data | AuditEvent on every denied req   |
-| 10.2.4     | Invalid logical access attempts  | `decision=rejected/conflict`     |
-| 10.3       | Record audit trail entries        | JSON schema with all fields      |
-| 10.5       | Secure audit trails               | S3 SSE-AES256 + versioning       |
-| 10.7       | Retain audit trail >= 1 year     | 7-year S3 lifecycle policy       |
-| 10.7.b    | Available for analysis >= 3 mo   | 90 days Standard before Glacier  |
+| Requirement | Control                          | Evidence                                                                    | Status |
+|-------------|----------------------------------|-----------------------------------------------------------------------------|--------|
+| 10.2.2     | Log all access to cardholder data | AuditEvent on every denied req (Kinesis + structured log)                  | Implemented |
+| 10.2.4     | Invalid logical access attempts  | `decision=rejected/conflict` in audit events                               | Implemented |
+| 10.3       | Record audit trail entries        | JSON schema with all fields (see schema above)                             | Implemented |
+| 10.5       | Secure audit trails               | S3 SSE-AES256 + versioning defined in Terraform; **not yet deployed**      | Planned |
+| 10.7       | Retain audit trail >= 1 year     | 7-year S3 lifecycle defined in Terraform; **not yet deployed**. Currently, retention depends on CloudWatch Logs retention settings and Kinesis stream retention (default 24h). | Planned |
+| 10.7.b    | Available for analysis >= 3 mo   | 90 days Standard before Glacier defined in Terraform; **not yet deployed** | Planned |

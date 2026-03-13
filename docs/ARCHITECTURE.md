@@ -40,8 +40,11 @@
                                           ┌──────────────────┐
                                           │  Data Analytics  │
                                           │  (S3 + Athena)   │
+                                          │  [NOT YET WIRED] │
                                           └──────────────────┘
 ```
+
+> **Note:** The S3 + Athena analytics layer is defined in Terraform (`terraform/modules/kinesis/main.tf`, gated behind `enable_kinesis_firehose` and `enable_audit_compliance`) but has not been deployed or validated. Currently, Kinesis events are consumed only by the live SSE dashboard and structured log output.
 
 ---
 
@@ -131,7 +134,7 @@
 
 1. After a rate-limit decision or idempotency check/complete, the API builds an event (e.g. `RateLimitChecked`, `IdempotencyChecked`).
 2. Event is published to Kinesis (`PutRecord` or `PutRecords`) in a **fire-and-forget** manner (e.g. spawned fiber); the HTTP response is not delayed by Kinesis.
-3. Failures (throttling, network) are logged; no retry to the client and no back-pressure on the request path. Consumers (e.g. S3/Athena, real-time dashboards) read from the stream independently.
+3. Failures (throttling, network) are logged; no retry to the client and no back-pressure on the request path. The live SSE dashboard consumes events in-process. S3/Athena consumption via Kinesis Firehose is defined in Terraform but not yet deployed (see [ADR-003](adr/003-fire-and-forget-event-publishing.md)).
 
 #### Rate limit algorithms
 

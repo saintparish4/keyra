@@ -329,7 +329,21 @@ Checks if service is ready to accept traffic (validates dependencies).
 
 ---
 
-**Note:** Metrics endpoint (`/metrics`) is not yet implemented. Metrics are published to CloudWatch when deployed to AWS, but not exposed via HTTP endpoint in the current implementation.
+### Prometheus Metrics
+
+Scrape endpoint for Prometheus-compatible metrics.
+
+**Endpoint:** `GET /metrics`
+
+Returns metrics in Prometheus text exposition format. Includes counters, gauges, and histograms for rate-limit decisions, idempotency checks, token quotas, DynamoDB latency, circuit breaker state, and event publishing. See the main README for the full metric list.
+
+**Response:** `200 OK` with `Content-Type: text/plain`
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+**Note:** Requires `PROMETHEUS_ENABLED=true` (default). Returns 404 if Prometheus is disabled.
 
 ---
 
