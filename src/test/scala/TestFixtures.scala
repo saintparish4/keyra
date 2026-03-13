@@ -32,7 +32,7 @@ package object testutil:
         def recordCacheMetrics(cacheName: String, hitRate: Double, size: Long): IO[Unit] =
           IO.unit
         def recordDegradedOperation(operation: String): IO[Unit] = IO.unit
-        def timed[A](name: String, dims: Map[String, String] = Map.empty)(fa: IO[A]): IO[A] = fa
+        override def timed[A](name: String, dims: Map[String, String] = Map.empty)(fa: IO[A]): IO[A] = fa
         def flush: IO[Unit] = IO.unit
 
     def capturingLogger(ref: Ref[IO, List[String]]): Logger[IO] =

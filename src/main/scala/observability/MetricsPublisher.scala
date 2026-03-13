@@ -8,6 +8,7 @@ import scala.jdk.CollectionConverters.*
 
 import org.typelevel.log4cats.Logger
 
+import cats.FlatMap
 import cats.effect.*
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
@@ -58,7 +59,7 @@ private[observability] case class BufferState(
   def drainAll: (BufferState, List[MetricDataPoint]) =
     (BufferState(), queue.toList)
 
-trait MetricsPublisher[F[_]]:
+trait MetricsPublisher[F[_]: Clock: FlatMap]:
   def increment(
       name: String,
       dimensions: Map[String, String] = Map.empty,
@@ -76,9 +77,17 @@ trait MetricsPublisher[F[_]]:
       dimensions: Map[String, String] = Map.empty,
   ): F[Unit]
 
+  /** Default implementation; implementations need only provide recordLatency. */
   def timed[A](name: String, dimensions: Map[String, String] = Map.empty)(
       fa: F[A],
-  ): F[A]
+  ): F[A] =
+    for
+      start     <- Clock[F].monotonic
+      result    <- fa
+      end       <- Clock[F].monotonic
+      latencyMs  = (end - start).toMillis.toDouble
+      _         <- recordLatency(name, latencyMs, dimensions)
+    yield result
 
   def recordRateLimitDecision(
       allowed: Boolean,
@@ -168,9 +177,6 @@ object MetricsPublisher:
         latencyMs: Double,
         dimensions: Map[String, String],
     ): F[Unit] = Async[F].unit
-    override def timed[A](name: String, dimensions: Map[String, String])(
-        fa: F[A],
-    ): F[A] = fa
     override def recordRateLimitDecision(
         allowed: Boolean,
         clientId: String,
@@ -292,17 +298,6 @@ private class CloudWatchMetricsPublisher[F[_]: Async: Logger](
     MetricDataPoint(name, latencyMs, StandardUnit.MILLISECONDS, dimensions),
   )
 
-  override def timed[A](name: String, dimensions: Map[String, String])(
-      fa: F[A],
-  ): F[A] =
-    for
-      start <- Clock[F].monotonic
-      result <- fa
-      end <- Clock[F].monotonic
-      latencyMs = (end - start).toMillis.toDouble
-      _ <- recordLatency(name, latencyMs, dimensions)
-    yield result
-
   override def recordRateLimitDecision(
       allowed: Boolean,
       clientId: String,
@@ -384,17 +379,6 @@ object LoggingMetrics:
         ): F[Unit] = logger.info(
           s"METRIC: $name latency=${latencyMs}ms ${formatDims(dimensions)}",
         )
-
-        override def timed[A](name: String, dimensions: Map[String, String])(
-            fa: F[A],
-        ): F[A] =
-          for
-            start <- Clock[F].monotonic
-            result <- fa
-            end <- Clock[F].monotonic
-            latencyMs = (end - start).toMillis.toDouble
-            _ <- recordLatency(name, latencyMs, dimensions)
-          yield result
 
         override def recordRateLimitDecision(
             allowed: Boolean,
