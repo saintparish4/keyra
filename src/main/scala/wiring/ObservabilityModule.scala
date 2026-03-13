@@ -27,7 +27,15 @@ object ObservabilityModule:
             maxBufferSize = config.metrics.maxBufferSize,
             flushThreshold = config.metrics.flushThreshold,
           )
-          MetricsPublisher.cloudWatch[F](config.aws.region, metricsConfig)
+          val logger = summon[Logger[F]]
+          Resource.make(
+            MetricsPublisher.cloudWatch[F](config.aws.region, metricsConfig)
+              .allocated,
+          ) { case (publisher, releaseInner) =>
+            logger.info("Flushing metrics buffer before shutdown...") *>
+              publisher.flush *> logger.info("Metrics buffer flushed.") *>
+              releaseInner
+          }.map(_._1)
         case false => Resource
             .pure[F, MetricsPublisher[F]](MetricsPublisher.noop[F])
 

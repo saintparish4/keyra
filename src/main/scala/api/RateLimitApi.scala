@@ -31,6 +31,7 @@ class RateLimitApi[F[_]: Async: Tracer](
     metricsPublisher: MetricsPublisher[F],
     config: RateLimitConfig,
     logger: Logger[F],
+    getRequestId: () => F[String],
 ) extends Http4sDsl[F]:
 
   /** POST /v1/ratelimit/check
@@ -201,24 +202,27 @@ class RateLimitApi[F[_]: Async: Tracer](
     )
 
     val publishAudit = decision match
-      case RateLimitDecision.Rejected(_, _) =>
-        val auditEvent = RateLimitEvent.AuditEvent(
-          timestamp = timestamp,
-          requestId = UUID.randomUUID().toString,
-          apiKey = client.apiKeyId,
-          clientId = client.clientId,
-          decision = "rejected",
-          reason = "Rate limit exceeded",
-          endpoint = request.endpoint,
-          sourceIp = None,
-          tier = Some(client.tier.toString),
-          traceId = traceId,
-        )
-        logger.info(s"AUDIT decision=rejected client=${client
-            .clientId} key=${request.key} tier=${client.tier}") *>
-          eventPublisher.publish(auditEvent).handleErrorWith(error =>
-            logger.warn(s"Failed to publish audit event: ${error.getMessage}"),
-          )
+      case RateLimitDecision.Rejected(_, _) => getRequestId()
+          .flatMap { requestId =>
+            val auditEvent = RateLimitEvent.AuditEvent(
+              timestamp = timestamp,
+              requestId = requestId,
+              apiKey = client.apiKeyId,
+              clientId = client.clientId,
+              decision = "rejected",
+              reason = "Rate limit exceeded",
+              endpoint = request.endpoint,
+              sourceIp = None,
+              tier = Some(client.tier.toString),
+              traceId = traceId,
+            )
+            logger.info(s"AUDIT decision=rejected client=${client
+                .clientId} key=${request.key} tier=${client.tier}") *>
+              eventPublisher.publish(auditEvent).handleErrorWith(error =>
+                logger
+                  .warn(s"Failed to publish audit event: ${error.getMessage}"),
+              )
+          }
       case _ => Async[F].unit
 
     publishMain *> publishAudit
@@ -254,5 +258,12 @@ object RateLimitApi:
       metricsPublisher: MetricsPublisher[F],
       config: RateLimitConfig,
       logger: Logger[F],
-  ): RateLimitApi[F] =
-    new RateLimitApi[F](store, eventPublisher, metricsPublisher, config, logger)
+      getRequestId: () => F[String],
+  ): RateLimitApi[F] = new RateLimitApi[F](
+    store,
+    eventPublisher,
+    metricsPublisher,
+    config,
+    logger,
+    getRequestId,
+  )

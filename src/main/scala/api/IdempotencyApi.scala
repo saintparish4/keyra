@@ -33,6 +33,7 @@ class IdempotencyApi[F[_]: Async: Tracer](
     eventPublisher: EventPublisher[F],
     metricsPublisher: MetricsPublisher[F],
     logger: Logger[F],
+    getRequestId: () => F[String],
 ) extends Http4sDsl[F]:
 
   /** POST /v1/idempotency/check
@@ -231,24 +232,27 @@ class IdempotencyApi[F[_]: Async: Tracer](
     )
 
     val publishAudit = result match
-      case IdempotencyResult.KeyConflict(key, _, _) =>
-        val auditEvent = RateLimitEvent.AuditEvent(
-          timestamp = timestamp,
-          requestId = UUID.randomUUID().toString,
-          apiKey = client.apiKeyId,
-          clientId = client.apiKeyId,
-          decision = "conflict",
-          reason = "Request hash mismatch on idempotency key",
-          endpoint = None,
-          sourceIp = None,
-          tier = None,
-          traceId = traceId,
-        )
-        logger.info(s"AUDIT decision=conflict client=${client
-            .apiKeyId} idempotencyKey=$key") *>
-          eventPublisher.publish(auditEvent).handleErrorWith(error =>
-            logger.warn(s"Failed to publish audit event: ${error.getMessage}"),
-          )
+      case IdempotencyResult.KeyConflict(key, _, _) => getRequestId()
+          .flatMap { requestId =>
+            val auditEvent = RateLimitEvent.AuditEvent(
+              timestamp = timestamp,
+              requestId = requestId,
+              apiKey = client.apiKeyId,
+              clientId = client.apiKeyId,
+              decision = "conflict",
+              reason = "Request hash mismatch on idempotency key",
+              endpoint = None,
+              sourceIp = None,
+              tier = None,
+              traceId = traceId,
+            )
+            logger.info(s"AUDIT decision=conflict client=${client
+                .apiKeyId} idempotencyKey=$key") *>
+              eventPublisher.publish(auditEvent).handleErrorWith(error =>
+                logger
+                  .warn(s"Failed to publish audit event: ${error.getMessage}"),
+              )
+          }
       case _ => Async[F].unit
 
     publishMain *> publishAudit
@@ -293,10 +297,12 @@ object IdempotencyApi:
       eventPublisher: EventPublisher[F],
       metricsPublisher: MetricsPublisher[F],
       logger: Logger[F],
+      getRequestId: () => F[String],
   ): IdempotencyApi[F] = new IdempotencyApi[F](
     store,
     idempotencyConfig,
     eventPublisher,
     metricsPublisher,
     logger,
+    getRequestId,
   )

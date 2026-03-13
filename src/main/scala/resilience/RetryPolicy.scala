@@ -39,7 +39,10 @@ case class RetryPolicy(
     maxDelay: FiniteDuration = 10.seconds,
     multiplier: Double = 2.0,
     jitterFactor: Double = 0.1,
-    retryOn: Throwable => Boolean = _ => true,
+    retryOn: Throwable => Boolean = {
+      case _: core.KeyraError.Retryable => true
+      case _ => false
+    },
 ):
   require(maxRetries >= 0, "maxRetries must be non-negative")
   require(baseDelay > Duration.Zero, "baseDelay must be positive")
@@ -78,7 +81,7 @@ object RetryPolicy:
     multiplier = 2.0,
     jitterFactor = 0.2,
     retryOn = {
-      case _: OCCConflictException => true
+      case _: core.KeyraError.Retryable => true
       case _: software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException =>
         true
       case _: software.amazon.awssdk.core.exception.SdkServiceException => true
@@ -86,14 +89,22 @@ object RetryPolicy:
     },
   )
 
-  /** Retry policy for OCC (optimistic concurrency control) conflicts. */
+  /** Retry policy for OCC (optimistic concurrency control) conflicts. Retries
+    * on KeyraError.Retryable and on OCCConflictException so that
+    * DynamoDBRateLimitStore / LeakyBucketRateLimitStore (which still throw
+    * OCCConflictException) get OCC retries.
+    */
   val occRetry: RetryPolicy = RetryPolicy(
     maxRetries = 10,
     baseDelay = 1.millis,
     maxDelay = 50.millis,
     multiplier = 1.5,
     jitterFactor = 0.2,
-    retryOn = { case _: OCCConflictException => true; case _ => false },
+    retryOn = {
+      case _: core.KeyraError.Retryable => true
+      case _: OCCConflictException => true
+      case _ => false
+    },
   )
 
   /** Retry policy for Kinesis throttling */
@@ -104,6 +115,7 @@ object RetryPolicy:
     multiplier = 2.0,
     jitterFactor = 0.15,
     retryOn = {
+      case _: core.KeyraError.Retryable => true
       case _: software.amazon.awssdk.services.kinesis.model.ProvisionedThroughputExceededException =>
         true
       case _: software.amazon.awssdk.core.exception.SdkServiceException => true

@@ -68,6 +68,7 @@ class IdempotencyApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
             EventPublisher.noop[IO],
             MetricsPublisher.noop[IO],
             logger,
+            () => IO.pure("test-request-id"),
           )
           body = s"""{"idempotencyKey": "cap-test", "ttl": $requestedTtl}"""
           req = Request[IO](Method.POST, uri"/v1/idempotency/check")
@@ -122,6 +123,7 @@ class IdempotencyApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
             EventPublisher.noop[IO],
             MetricsPublisher.noop[IO],
             logger,
+            () => IO.pure("test-request-id"),
           )
           body = s"""{"idempotencyKey": "warn-test", "ttl": $requestedTtl}"""
           req = Request[IO](Method.POST, uri"/v1/idempotency/check")

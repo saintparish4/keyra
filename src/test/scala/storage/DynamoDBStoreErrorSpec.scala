@@ -269,6 +269,7 @@ class DynamoDBStoreErrorSpec
         EventPublisher.noop[IO],
         MetricsPublisher.noop[IO],
         summon[Logger[IO]],
+        () => IO.pure("test-request-id"),
       )
 
       val body = s"""{"idempotencyKey": "$corruptKey"}"""

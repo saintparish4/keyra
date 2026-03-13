@@ -45,7 +45,13 @@ class TokenQuotaApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
       metrics: MetricsPublisher[IO] = MetricsPublisher.noop[IO],
   ): IO[TokenQuotaApi[IO]] = TokenQuotaStore.inMemory[IO].map { store =>
     val service = TokenQuotaService(store, config, metrics, Logger[IO])
-    TokenQuotaApi[IO](service, events, metrics, Logger[IO])
+    TokenQuotaApi[IO](
+      service,
+      events,
+      metrics,
+      Logger[IO],
+      () => IO.pure("test-request-id"),
+    )
   }
 
   def checkRequest(

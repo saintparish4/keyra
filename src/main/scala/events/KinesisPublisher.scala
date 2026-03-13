@@ -1,5 +1,6 @@
 package events
 
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 import org.typelevel.log4cats.Logger
@@ -7,7 +8,7 @@ import org.typelevel.log4cats.Logger
 import config.KinesisConfig
 import cats.effect.std.Queue
 import cats.effect.syntax.spawn.*
-import cats.effect.{Async, Fiber, Resource}
+import cats.effect.{Async, Fiber, Resource, Temporal}
 import cats.syntax.all.*
 import io.circe.syntax.*
 import software.amazon.awssdk.core.SdkBytes
@@ -32,7 +33,7 @@ import observability.MetricsPublisher
   * back-pressure: the queue size is configurable (`kinesis.queue-size`) and
   * dropped events are counted in CloudWatch.
   */
-class KinesisPublisher[F[_]: Async: Logger](
+class KinesisPublisher[F[_]: Async: Logger: Temporal](
     client: KinesisAsyncClient,
     config: KinesisConfig,
     queue: Queue[F, RateLimitEvent],
@@ -60,6 +61,17 @@ class KinesisPublisher[F[_]: Async: Logger](
     */
   private[events] def drainLoop: F[Nothing] = queue.take
     .flatMap(publishWithRetry).foreverM
+
+  /** Drain remaining events from the queue on shutdown. Bounded by a 10s
+    * timeout so shutdown does not block indefinitely.
+    */
+  private def drain(): F[Unit] = Temporal[F].timeout(
+    queue.size.flatMap(n =>
+      if n == 0 then Async[F].unit
+      else queue.take.flatMap(publishWithRetry) *> drain(),
+    ),
+    10.seconds,
+  ).handleError(_ => ())
 
   private def publishWithRetry(event: RateLimitEvent): F[Unit] = publishDirect(
     event,
@@ -89,14 +101,18 @@ object KinesisPublisher:
     * The queue uses `circularBuffer` semantics: `offer` never blocks; if the
     * queue is full the oldest event is evicted to make room for the new one.
     */
-  def resource[F[_]: Async: Logger](
+  def resource[F[_]: Async: Logger: Temporal](
       client: KinesisAsyncClient,
       config: KinesisConfig,
       metrics: MetricsPublisher[F],
   ): Resource[F, EventPublisher[F]] =
+    val logger = summon[Logger[F]]
     for
       queue <- Resource
         .eval(Queue.circularBuffer[F, RateLimitEvent](config.queueSize))
       publisher = new KinesisPublisher[F](client, config, queue, metrics)
-      _ <- Resource.make(publisher.drainLoop.start)(_.cancel)
+      _ <- Resource.make(publisher.drainLoop.start)(fiber =>
+        logger.info("Draining Kinesis event queue...") *> publisher.drain() *>
+          logger.info("Kinesis queue drained.") *> fiber.cancel,
+      )
     yield publisher

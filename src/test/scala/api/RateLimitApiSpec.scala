@@ -49,7 +49,11 @@ class RateLimitApiSpec extends AsyncFreeSpec with AsyncIOSpec with Matchers:
       events: EventPublisher[IO] = EventPublisher.noop[IO],
       metrics: MetricsPublisher[IO] = MetricsPublisher.noop[IO],
   ): IO[RateLimitApi[IO]] = InMemoryRateLimitStore.create[IO]
-    .map(store => RateLimitApi[IO](store, events, metrics, config, Logger[IO]))
+    .map(store =>
+      RateLimitApi[IO](store, events, metrics, config, Logger[IO], () =>
+        IO.pure("test-request-id"),
+      ),
+    )
 
   def postCheckRequest(
       key: String,

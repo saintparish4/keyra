@@ -27,6 +27,7 @@ class TokenQuotaApi[F[_]: Async: Tracer](
     eventPublisher: EventPublisher[F],
     metricsPublisher: MetricsPublisher[F],
     logger: Logger[F],
+    getRequestId: () => F[String],
 ) extends Http4sDsl[F]:
 
   /** POST /v1/quota/check
@@ -155,27 +156,31 @@ class TokenQuotaApi[F[_]: Async: Tracer](
         apiKey = client.apiKeyId,
         traceId = traceId,
       )
-      val auditEvent = RateLimitEvent.AuditEvent(
-        timestamp = timestamp,
-        requestId = UUID.randomUUID().toString,
-        apiKey = client.apiKeyId,
-        clientId = client.apiKeyId,
-        decision = "quota_exceeded",
-        reason = s"${level.prefix} quota exceeded: $used/$limit tokens",
-        endpoint = Some("/v1/quota/check"),
-        sourceIp = None,
-        tier = None,
-        traceId = traceId,
-      )
-      val publishMain = eventPublisher.publish(event).handleErrorWith(error =>
-        logger.warn(s"Failed to publish token quota event: ${error.getMessage}"),
-      )
-      val publishAudit = logger.info(s"AUDIT decision=quota_exceeded user=${req
-          .userId} level=${level.prefix} used=$used/$limit") *>
-        eventPublisher.publish(auditEvent).handleErrorWith(error =>
-          logger.warn(s"Failed to publish audit event: ${error.getMessage}"),
+      getRequestId().flatMap { requestId =>
+        val auditEvent = RateLimitEvent.AuditEvent(
+          timestamp = timestamp,
+          requestId = requestId,
+          apiKey = client.apiKeyId,
+          clientId = client.apiKeyId,
+          decision = "quota_exceeded",
+          reason = s"${level.prefix} quota exceeded: $used/$limit tokens",
+          endpoint = Some("/v1/quota/check"),
+          sourceIp = None,
+          tier = None,
+          traceId = traceId,
         )
-      publishMain *> publishAudit
+        val publishMain = eventPublisher.publish(event).handleErrorWith(error =>
+          logger
+            .warn(s"Failed to publish token quota event: ${error.getMessage}"),
+        )
+        val publishAudit = logger
+          .info(s"AUDIT decision=quota_exceeded user=${req.userId} level=${level
+              .prefix} used=$used/$limit") *>
+          eventPublisher.publish(auditEvent).handleErrorWith(error =>
+            logger.warn(s"Failed to publish audit event: ${error.getMessage}"),
+          )
+        publishMain *> publishAudit
+      }
     case _ => Async[F].unit
 
 // Request/Response models
@@ -218,5 +223,11 @@ object TokenQuotaApi:
       eventPublisher: EventPublisher[F],
       metricsPublisher: MetricsPublisher[F],
       logger: Logger[F],
-  ): TokenQuotaApi[F] =
-    new TokenQuotaApi[F](quotaService, eventPublisher, metricsPublisher, logger)
+      getRequestId: () => F[String],
+  ): TokenQuotaApi[F] = new TokenQuotaApi[F](
+    quotaService,
+    eventPublisher,
+    metricsPublisher,
+    logger,
+    getRequestId,
+  )

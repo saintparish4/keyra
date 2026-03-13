@@ -1,7 +1,7 @@
 import scala.concurrent.duration.*
 
 import org.http4s.ember.server.EmberServerBuilder
-import org.http4s.server.Server
+import org.http4s.server.{Router, Server}
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.typelevel.otel4s.oteljava.OtelJava
@@ -15,6 +15,7 @@ import api.Routes
 import config.*
 import core.*
 import events.{BroadcastingEventPublisher, EventPublisher, KinesisPublisher}
+import observability.CorrelationIdMiddleware
 import resilience.HealthAggregator
 import wiring.*
 
@@ -63,6 +64,8 @@ object Main extends IOApp:
           yield tracer
         case false => Resource.pure[IO, Tracer[IO]](Tracer.noop[IO])
 
+      correlationLocal <- Resource.eval(CorrelationIdMiddleware.makeLocal)
+
       tokenQuotaApi <- Resource.eval(stores.tokenQuotaStore.traverse { tqs =>
         val svc = core.TokenQuotaService[IO](
           tqs,
@@ -75,6 +78,9 @@ object Main extends IOApp:
           eventPublisher,
           obs.metricsPublisher,
           summon[Logger[IO]],
+          () =>
+            correlationLocal.get
+              .map(_.getOrElse(java.util.UUID.randomUUID().toString)),
         ))
       })
 
@@ -94,6 +100,10 @@ object Main extends IOApp:
       )
       healthCheck = HealthAggregator.aggregate(healthSources)
 
+      getRequestId = () =>
+        correlationLocal.get
+          .map(_.getOrElse(java.util.UUID.randomUUID().toString))
+
       routes <- Resource.eval(Routes[IO](
         stores.resilientStore,
         stores.idempotencyStore,
@@ -107,13 +117,24 @@ object Main extends IOApp:
         tokenQuotaApi,
         obs.promMetrics,
         healthCheck,
+        getRequestId,
       ))
+
+      appWithCorrelation = CorrelationIdMiddleware
+        .middleware(correlationLocal)(routes.routes)
+      httpApp: org.http4s.HttpApp[IO] = Router("/" -> appWithCorrelation)
+        .orNotFound
+
+      _ <- Resource.make(Async[IO].unit)(_ =>
+        summon[Logger[IO]]
+          .info("Shutdown signal received -- draining in-flight requests"),
+      )
 
       server <- EmberServerBuilder.default[IO]
         .withHost(Host.fromString(config.server.host).getOrElse(host"0.0.0.0"))
         .withPort(Port.fromInt(config.server.port).getOrElse(port"8080"))
-        .withHttpApp(routes.httpApp)
-        .withShutdownTimeout(config.server.shutdownTimeout).build
+        .withHttpApp(httpApp).withShutdownTimeout(config.server.shutdownTimeout)
+        .build
       _ <- Resource.eval(summon[Logger[IO]].info(s"Server started on ${config
           .server.host}:${config.server.port}"))
     yield server

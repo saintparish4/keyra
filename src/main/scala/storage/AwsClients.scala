@@ -10,6 +10,8 @@ import config.{AwsConfig, DynamoDBConfig}
 import software.amazon.awssdk.auth.credentials.{
   AwsBasicCredentials, DefaultCredentialsProvider, StaticCredentialsProvider,
 }
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration
+import software.amazon.awssdk.core.retry.RetryPolicy as SdkRetryPolicy
 import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient
 import software.amazon.awssdk.regions.Region
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
@@ -33,23 +35,33 @@ object AwsClients:
       dynamoDBConfig: DynamoDBConfig,
   ): Resource[F, DynamoDbAsyncClient] = Resource.make {
     Async[F].delay {
-      // Configure HTTP client with timeouts and connection pool settings
+      val c = awsConfig.client
       val httpClient = NettyNioAsyncHttpClient.builder().connectionTimeout(
         JavaDuration.ofMillis(dynamoDBConfig.connectionTimeout.toMillis),
       ).readTimeout(JavaDuration.ofMillis(dynamoDBConfig.requestTimeout.toMillis))
         .writeTimeout(JavaDuration.ofMillis(
           dynamoDBConfig.requestTimeout.toMillis,
-        )).maxConcurrency(50) // Maximum concurrent connections
-        .maxPendingConnectionAcquires(100) // Max pending connection acquisitions
-        .connectionAcquisitionTimeout(JavaDuration.ofSeconds(5))
-        .connectionTimeToLive(JavaDuration.ofSeconds(60)) // Reuse connections for 60s
-        .connectionMaxIdleTime(JavaDuration.ofSeconds(5)) // Close idle connections after 5s
+        )).maxConcurrency(c.maxConnections)
+        .maxPendingConnectionAcquires(c.maxPendingAcquires)
+        .connectionAcquisitionTimeout(JavaDuration.ofSeconds(
+          c.connectionAcquisitionTimeoutSeconds,
+        )).connectionTimeToLive(JavaDuration.ofSeconds(
+          c.connectionTimeToLiveSeconds,
+        ))
+        .connectionMaxIdleTime(JavaDuration.ofSeconds(c.connectionMaxIdleSeconds))
         .build()
+
+      // Disable SDK-level retries: Keyra handles retries via RetryPolicy.
+      val overrideConfig =
+        if c.disableSdkRetries then
+          ClientOverrideConfiguration.builder().retryPolicy(SdkRetryPolicy.none())
+            .build()
+        else ClientOverrideConfiguration.builder().build()
 
       val builder = DynamoDbAsyncClient.builder()
         .region(Region.of(awsConfig.region)).httpClient(httpClient)
+        .overrideConfiguration(overrideConfig)
 
-      // Configure credentials based on environment
       val withCredentials =
         if awsConfig.localstack then
           builder.credentialsProvider(StaticCredentialsProvider.create(
@@ -57,7 +69,6 @@ object AwsClients:
           ))
         else builder.credentialsProvider(DefaultCredentialsProvider.create())
 
-      // Override endpoint for Localstack or custom endpoint
       val withEndpoint = awsConfig.dynamodbEndpoint match
         case Some(endpoint) => withCredentials
             .endpointOverride(URI.create(endpoint))
@@ -78,21 +89,32 @@ object AwsClients:
       dynamoDBConfig: DynamoDBConfig, // Reuse DynamoDB timeout config for consistency
   ): Resource[F, KinesisAsyncClient] = Resource.make {
     Async[F].delay {
-      // Configure HTTP client with timeouts and connection pool settings
+      val c = awsConfig.client
       val httpClient = NettyNioAsyncHttpClient.builder().connectionTimeout(
         JavaDuration.ofMillis(dynamoDBConfig.connectionTimeout.toMillis),
       ).readTimeout(JavaDuration.ofMillis(dynamoDBConfig.requestTimeout.toMillis))
         .writeTimeout(JavaDuration.ofMillis(
           dynamoDBConfig.requestTimeout.toMillis,
-        )).maxConcurrency(50) // Maximum concurrent connections
-        .maxPendingConnectionAcquires(100) // Max pending connection acquisitions
-        .connectionAcquisitionTimeout(JavaDuration.ofSeconds(5))
-        .connectionTimeToLive(JavaDuration.ofSeconds(60)) // Reuse connections for 60s
-        .connectionMaxIdleTime(JavaDuration.ofSeconds(5)) // Close idle connections after 5s
+        )).maxConcurrency(c.maxConnections)
+        .maxPendingConnectionAcquires(c.maxPendingAcquires)
+        .connectionAcquisitionTimeout(JavaDuration.ofSeconds(
+          c.connectionAcquisitionTimeoutSeconds,
+        )).connectionTimeToLive(JavaDuration.ofSeconds(
+          c.connectionTimeToLiveSeconds,
+        ))
+        .connectionMaxIdleTime(JavaDuration.ofSeconds(c.connectionMaxIdleSeconds))
         .build()
+
+      // Disable SDK-level retries: Keyra handles retries via RetryPolicy.
+      val overrideConfig =
+        if c.disableSdkRetries then
+          ClientOverrideConfiguration.builder().retryPolicy(SdkRetryPolicy.none())
+            .build()
+        else ClientOverrideConfiguration.builder().build()
 
       val builder = KinesisAsyncClient.builder()
         .region(Region.of(awsConfig.region)).httpClient(httpClient)
+        .overrideConfiguration(overrideConfig)
 
       val withCredentials =
         if awsConfig.localstack then

@@ -108,6 +108,7 @@ class HttpApiIntegrationSpec
     tokenQuotaApi = None,
     prometheusMetrics = None,
     healthCheck = IO.pure(AggregateHealth("ok", Nil)),
+    getRequestId = () => IO.pure("test-request-id"),
   )
 
   lazy val httpApp: HttpApp[IO] = routes.httpApp

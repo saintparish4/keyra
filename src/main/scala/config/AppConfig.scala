@@ -16,12 +16,25 @@ case class ServerConfig(
 ) derives ConfigReader
 
 // AWS configuration for SDK clients
+/** HTTP connection pool settings for each AWS SDK client. These are passed
+  * directly to NettyNioAsyncHttpClient.
+  */
+case class AwsClientConfig(
+    maxConnections: Int = 50,
+    maxPendingAcquires: Int = 100,
+    connectionAcquisitionTimeoutSeconds: Int = 5,
+    connectionTimeToLiveSeconds: Int = 60,
+    connectionMaxIdleSeconds: Int = 5,
+    disableSdkRetries: Boolean = true,
+) derives ConfigReader
+
 case class AwsConfig(
     region: String,
     localstack: Boolean,
     endpoint: String = "",
     dynamodbEndpoint: Option[String] = None,
     kinesisEndpoint: Option[String] = None,
+    client: AwsClientConfig = AwsClientConfig(),
 ) derives ConfigReader
 
 // DynamoDB table configuration

@@ -45,6 +45,7 @@ class Routes[F[_]: Async: Tracer](
     tokenQuotaApi: Option[TokenQuotaApi[F]],
     prometheusMetrics: Option[PrometheusMetrics[F]],
     healthCheck: F[AggregateHealth],
+    getRequestId: () => F[String],
 ) extends Http4sDsl[F]:
 
   private val rateLimitApi = RateLimitApi[F](
@@ -53,6 +54,7 @@ class Routes[F[_]: Async: Tracer](
     metricsPublisher,
     rateLimitConfig,
     logger,
+    getRequestId,
   )
 
   private val idempotencyApi = IdempotencyApi[F](
@@ -61,6 +63,7 @@ class Routes[F[_]: Async: Tracer](
     eventPublisher,
     metricsPublisher,
     logger,
+    getRequestId,
   )
 
   // Public routes (no auth required)
@@ -149,6 +152,7 @@ object Routes:
       tokenQuotaApi: Option[TokenQuotaApi[F]] = None,
       prometheusMetrics: Option[PrometheusMetrics[F]] = None,
       healthCheck: F[AggregateHealth],
+      getRequestId: () => F[String],
   ): F[Routes[F]] =
     for
       dashboardApi <- DashboardApi.apply[F](
@@ -171,5 +175,6 @@ object Routes:
         tokenQuotaApi,
         prometheusMetrics,
         healthCheck,
+        getRequestId,
       )
     yield routes

@@ -55,8 +55,12 @@ class AuditEventIntegrationSpec extends AsyncFreeSpec with AsyncIOSpec with Matc
       for
         store <- RateLimitStore.inMemory[IO]
         api = RateLimitApi[IO](
-          store, capturingPublisher,
-          MetricsPublisher.noop[IO], config, summon[Logger[IO]],
+          store,
+          capturingPublisher,
+          MetricsPublisher.noop[IO],
+          config,
+          summon[Logger[IO]],
+          () => IO.pure("test-request-id"),
         )
         client = AuthenticatedClient(
           apiKeyId = "test-key",
