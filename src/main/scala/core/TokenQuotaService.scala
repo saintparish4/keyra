@@ -64,11 +64,11 @@ trait TokenQuotaStore[F[_]]:
   def healthCheck: F[Either[String, Unit]]
 
 object TokenQuotaStore:
-  def inMemory[F[_]: Async]: F[TokenQuotaStore[F]] =
-    Ref.of[F, Map[String, TokenQuotaState]](Map.empty).map { ref =>
+  def inMemory[F[_]: Async]: F[TokenQuotaStore[F]] = Ref
+    .of[F, Map[String, TokenQuotaState]](Map.empty).map { ref =>
       new TokenQuotaStore[F]:
-        override def getQuota(pk: String): F[Option[TokenQuotaState]] =
-          ref.get.map(_.get(pk))
+        override def getQuota(pk: String): F[Option[TokenQuotaState]] = ref.get
+          .map(_.get(pk))
 
         override def incrementQuota(
             pk: String,
@@ -76,31 +76,30 @@ object TokenQuotaStore:
             outputTokensDelta: Long,
             windowSeconds: Long,
             nowMs: Long,
-        ): F[Boolean] =
-          ref.modify { m =>
-            val current      = m.get(pk)
-            val withinWindow = current.exists(s => nowMs - s.windowStart < windowSeconds * 1000)
-            if withinWindow then
-              val s       = current.get
-              val updated = TokenQuotaState(
-                math.max(0, s.inputTokens + inputTokensDelta),
-                math.max(0, s.outputTokens + outputTokensDelta),
-                s.windowStart,
-                s.version + 1,
-              )
-              (m + (pk -> updated), true)
-            else
-              val fresh = TokenQuotaState(
-                math.max(0, inputTokensDelta),
-                math.max(0, outputTokensDelta),
-                nowMs,
-                1L,
-              )
-              (m + (pk -> fresh), true)
-          }
+        ): F[Boolean] = ref.modify { m =>
+          val current = m.get(pk)
+          val withinWindow = current
+            .exists(s => nowMs - s.windowStart < windowSeconds * 1000)
+          if withinWindow then
+            val s = current.get
+            val updated = TokenQuotaState(
+              math.max(0, s.inputTokens + inputTokensDelta),
+              math.max(0, s.outputTokens + outputTokensDelta),
+              s.windowStart,
+              s.version + 1,
+            )
+            (m + (pk -> updated), true)
+          else
+            val fresh = TokenQuotaState(
+              math.max(0, inputTokensDelta),
+              math.max(0, outputTokensDelta),
+              nowMs,
+              1L,
+            )
+            (m + (pk -> fresh), true)
+        }
 
-        override def healthCheck: F[Either[String, Unit]] =
-          Async[F].pure(Right(()))
+        override def healthCheck: F[Either[String, Unit]] = Async[F].pure(Right(()))
     }
 
 trait TokenQuotaService[F[_]]:

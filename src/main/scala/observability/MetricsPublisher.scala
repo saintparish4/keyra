@@ -77,16 +77,17 @@ trait MetricsPublisher[F[_]: Clock: FlatMap]:
       dimensions: Map[String, String] = Map.empty,
   ): F[Unit]
 
-  /** Default implementation; implementations need only provide recordLatency. */
+  /** Default implementation; implementations need only provide recordLatency.
+    */
   def timed[A](name: String, dimensions: Map[String, String] = Map.empty)(
       fa: F[A],
   ): F[A] =
     for
-      start     <- Clock[F].monotonic
-      result    <- fa
-      end       <- Clock[F].monotonic
-      latencyMs  = (end - start).toMillis.toDouble
-      _         <- recordLatency(name, latencyMs, dimensions)
+      start <- Clock[F].monotonic
+      result <- fa
+      end <- Clock[F].monotonic
+      latencyMs = (end - start).toMillis.toDouble
+      _ <- recordLatency(name, latencyMs, dimensions)
     yield result
 
   def recordRateLimitDecision(

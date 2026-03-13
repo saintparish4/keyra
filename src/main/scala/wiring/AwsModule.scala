@@ -18,7 +18,9 @@ case class AwsModule[F[_]](
 )
 
 object AwsModule:
-  def resource[F[_]: Async: Logger](config: AppConfig): Resource[F, AwsModule[F]] =
+  def resource[F[_]: Async: Logger](
+      config: AppConfig,
+  ): Resource[F, AwsModule[F]] =
     for
       dynamoClient <- AwsClients.dynamoDbClient[F](config.aws, config.dynamodb)
       kinesisClient <-

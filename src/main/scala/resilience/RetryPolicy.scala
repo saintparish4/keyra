@@ -171,14 +171,18 @@ object Retry:
     attempt(policy.maxRetries, 1, Duration.Zero)
 
   /** Calculate delay for a given attempt with exponential backoff and jitter.
+    * Uses numeric capping in millis to avoid overflow when attempt is large
+    * (e.g. baseDelay * multiplier^attempt can exceed FiniteDuration range).
     */
-  private def calculateDelay(
+  private[resilience] def calculateDelay(
       policy: RetryPolicy,
       attempt: Int,
   ): FiniteDuration =
-    val exponentialDelay = policy.baseDelay *
-      math.pow(policy.multiplier, attempt - 1)
-    val cappedDelay = exponentialDelay.min(policy.maxDelay)
+    val baseMs = policy.baseDelay.toMillis.toDouble
+    val maxMs = policy.maxDelay.toMillis.toDouble
+    val rawMs = baseMs * math.pow(policy.multiplier, (attempt - 1).max(0))
+    val cappedMs = rawMs.min(maxMs).min(Long.MaxValue.toDouble / 2)
+    val cappedDelay = cappedMs.toLong.millis
 
     // Add jitter
     val jitter: FiniteDuration =
@@ -188,10 +192,9 @@ object Retry:
         randomJitter.millis
       else 0.millis
 
-    val result = cappedDelay + jitter
-    result match
-      case fd: FiniteDuration => fd
-      case _ => 0.millis
+    val totalMs = (cappedDelay.toMillis.toDouble + jitter.toMillis)
+      .min(Long.MaxValue.toDouble / 2)
+    totalMs.toLong.millis
 
   /** Convenience method for simple retries without custom policy.
     */

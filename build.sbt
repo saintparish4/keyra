@@ -40,7 +40,10 @@ libraryDependencies ++= Seq(
 
   // Testing
   "org.scalatest" %% "scalatest" % "3.2.19" % Test,
+  "org.scalatestplus" %% "scalacheck-1-18" % "3.2.19.0" % Test,
+  "org.scalacheck" %% "scalacheck" % "1.18.1" % Test, 
   "org.typelevel" %% "cats-effect-testing-scalatest" % "1.7.0" % Test,
+  "org.typelevel" %% "cats-effect-testkit"            % CatsEffectVersion % Test,
   "org.testcontainers" % "localstack" % "1.21.4" % Test,
 
    // Prometheus metrics

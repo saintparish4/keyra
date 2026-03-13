@@ -25,7 +25,7 @@ import software.amazon.awssdk.services.kinesis.model.{
 /** Base trait for integration tests using LocalStack
   *
   * Provides:
-  *   - Shared LocalStack container (started once per test class)
+  *   - LocalStack container (started once per test class)
   *   - DynamoDB and Kinesis async clients
   *   - Helper methods to create tables and streams
   *   - Automatic cleanup after tests
@@ -33,7 +33,6 @@ import software.amazon.awssdk.services.kinesis.model.{
 trait LocalStackIntegrationSpec extends BeforeAndAfterAll {
   self: Suite =>
 
-  // LocalStack container with DynamoDB and Kinesis
   protected lazy val localstack: LocalStackContainer = {
     val container =
       new LocalStackContainer(DockerImageName.parse("localstack/localstack"))
@@ -120,17 +119,13 @@ trait LocalStackIntegrationSpec extends BeforeAndAfterAll {
       ).billingMode(BillingMode.PAY_PER_REQUEST).build()
 
     dynamoDbClient.createTable(request).get()
-
-    // Wait for table to be active
     waitForTableActive(tableName)
 
-    // Enable TTL
     val ttlRequest = UpdateTimeToLiveRequest.builder().tableName(tableName)
       .timeToLiveSpecification(
         TimeToLiveSpecification.builder().attributeName("ttl").enabled(true)
           .build(),
       ).build()
-
     dynamoDbClient.updateTimeToLive(ttlRequest).get()
   }
 
@@ -154,10 +149,7 @@ trait LocalStackIntegrationSpec extends BeforeAndAfterAll {
   protected def createKinesisStream(streamName: String): Unit = {
     val request = CreateStreamRequest.builder().streamName(streamName)
       .shardCount(1).build()
-
     kinesisClient.createStream(request).get()
-
-    // Wait for stream to be active
     waitForStreamActive(streamName)
   }
 
