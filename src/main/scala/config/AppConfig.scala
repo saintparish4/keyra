@@ -41,6 +41,7 @@ case class AwsConfig(
 case class DynamoDBConfig(
     rateLimitTable: String,
     idempotencyTable: String,
+    maxRetries: Int = 3,
     connectionTimeout: FiniteDuration = scala.concurrent.duration
       .Duration(5, "seconds"),
     requestTimeout: FiniteDuration = scala.concurrent.duration
@@ -54,6 +55,7 @@ case class KinesisConfig(
     batchSize: Int = 100,
     flushInterval: FiniteDuration = scala.concurrent.duration
       .Duration(1, "second"),
+    maxRetries: Int = 3,
     queueSize: Int = 10000,
 ) derives ConfigReader
 
@@ -61,6 +63,9 @@ case class KinesisConfig(
 case class MetricsConfig(
     enabled: Boolean = true,
     namespace: String = "RateLimiter",
+    flushInterval: FiniteDuration = scala.concurrent.duration
+      .Duration(60, "seconds"),
+    highResolution: Boolean = false,
     maxBufferSize: Int = 50000,
     flushThreshold: Int = 1000,
 ) derives ConfigReader
@@ -76,6 +81,8 @@ case class TracingConfig(
 // Security configuration
 case class AuthenticationConfig(
     enabled: Boolean = true,
+    headerName: String = "Authorization",
+    apiKeyPrefix: String = "Bearer",
     rateLimitPerMinute: Int = 1000,
     maxFailedAttempts: Int = 10,
 ) derives ConfigReader
@@ -170,6 +177,8 @@ case class BulkheadSettings(
 case class TimeoutSettings(
     rateLimitCheck: FiniteDuration = scala.concurrent.duration
       .Duration(500, "millis"),
+    idempotencyCheck: FiniteDuration = scala.concurrent.duration
+      .Duration(2, "seconds"),
     healthCheck: FiniteDuration = scala.concurrent.duration
       .Duration(5, "seconds"),
 ) derives ConfigReader
@@ -190,6 +199,13 @@ case class ResilienceConfig(
 
 case class StorageConfig(
     backend: String = "dynamodb", // "in-memory" | "dynamodb"
+) derives ConfigReader
+
+case class CacheConfig(
+    enabled: Boolean = true,
+    maxSize: Int = 10000,
+    ttl: FiniteDuration = scala.concurrent.duration.Duration(1, "second"),
+    recordStats: Boolean = true,
 ) derives ConfigReader
 
 /** Audit trail configuration for PCI DSS 4.0.1 compliance. */
@@ -216,6 +232,7 @@ case class AppConfig(
       secrets = SecretsConfig(),
     ),
     resilience: ResilienceConfig = ResilienceConfig(),
+    cache: CacheConfig = CacheConfig(),
     storage: StorageConfig = StorageConfig(),
     audit: AuditConfig = AuditConfig(),
 ) derives ConfigReader
@@ -240,13 +257,42 @@ object AppConfig:
       else Sync[F].pure(config)
     }
 
-  def loadOrDefault[F[_]: Sync]: F[AppConfig] = load[F].handleErrorWith(_ =>
-    Sync[F].pure(AppConfig(
-      server = ServerConfig("0.0.0.0", 8080),
-      aws = AwsConfig("us-east-1", false, ""),
-      dynamodb = DynamoDBConfig("rate-limits", "idempotency"),
-      kinesis = KinesisConfig("rate-limit-events", false),
-      rateLimit = RateLimitConfig(100, 10.0, 3600, "token-bucket"),
-      idempotency = IdempotencyConfig(),
-    )),
-  )
+  def loadOrDefault[F[_]: Sync]: F[AppConfig] = load[F].handleErrorWith { err =>
+    Sync[F].delay {
+      System.err
+        .println(s"[WARN] AppConfig.load failed, using env-var fallback: ${err
+            .getMessage}")
+      val useLocalstack = Option(System.getenv("USE_LOCALSTACK"))
+        .exists(v => v.equalsIgnoreCase("true") || v == "1")
+      val dynamoEndpoint = Option(System.getenv("DYNAMODB_ENDPOINT"))
+      val kinesisEndpoint = Option(System.getenv("KINESIS_ENDPOINT"))
+      val awsEndpoint = Option(System.getenv("AWS_ENDPOINT")).getOrElse("")
+      val degradationMode = Option(System.getenv("DEGRADATION_MODE"))
+        .getOrElse("reject-all")
+      val algorithm = Option(System.getenv("RATE_LIMIT_ALGORITHM"))
+        .getOrElse("token-bucket")
+      val timeout =
+        if useLocalstack then
+          TimeoutSettings(
+            rateLimitCheck = scala.concurrent.duration.Duration(5, "seconds"),
+            healthCheck = scala.concurrent.duration.Duration(5, "seconds"),
+          )
+        else TimeoutSettings()
+      AppConfig(
+        server = ServerConfig("0.0.0.0", 8080),
+        aws = AwsConfig(
+          region = Option(System.getenv("AWS_REGION")).getOrElse("us-east-1"),
+          localstack = useLocalstack,
+          endpoint = awsEndpoint,
+          dynamodbEndpoint = dynamoEndpoint,
+          kinesisEndpoint = kinesisEndpoint,
+        ),
+        dynamodb = DynamoDBConfig("rate-limits", "idempotency"),
+        kinesis = KinesisConfig("rate-limit-events", false),
+        rateLimit = RateLimitConfig(100, 10.0, 3600, algorithm),
+        idempotency = IdempotencyConfig(),
+        resilience =
+          ResilienceConfig(timeout = timeout, degradationMode = degradationMode),
+      )
+    }
+  }

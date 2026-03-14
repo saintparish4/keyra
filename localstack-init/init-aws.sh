@@ -9,7 +9,7 @@ echo "============================================"
 wait_for_localstack() {
     local max_attempts=30
     local attempt=1
-    
+
     echo "Waiting for LocalStack services to be ready..."
     while [ $attempt -le $max_attempts ]; do
         if curl -sf http://localhost:4566/_localstack/health >/dev/null 2>&1; then
@@ -20,7 +20,7 @@ wait_for_localstack() {
         sleep 2
         attempt=$((attempt + 1))
     done
-    
+
     echo "ERROR: LocalStack did not become ready after $max_attempts attempts"
     return 1
 }
@@ -30,7 +30,7 @@ wait_for_service() {
     local service=$1
     local max_attempts=20
     local attempt=1
-    
+
     while [ $attempt -le $max_attempts ]; do
         if awslocal "$service" list-tables >/dev/null 2>&1 || awslocal "$service" list-streams >/dev/null 2>&1; then
             return 0
@@ -38,7 +38,7 @@ wait_for_service() {
         sleep 1
         attempt=$((attempt + 1))
     done
-    
+
     echo "WARNING: Service $service may not be fully ready"
     return 0
 }

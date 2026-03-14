@@ -24,6 +24,12 @@ import security.*
 import config.RateLimitConfig
 
 /** Rate limit API endpoints.
+  *
+  * Developer note: The API passes `resetAt` from `RateLimitDecision` into both
+  * the JSON body and the `X-RateLimit-Reset` header. Store implementations
+  * (token bucket, leaky-bucket, sliding-window) each return the correct reset
+  * instant for their algorithm; no algorithm-specific handling is needed here —
+  * "epoch seconds at which capacity resets" is algorithm-agnostic.
   */
 class RateLimitApi[F[_]: Async: Tracer](
     store: RateLimitStore[F],

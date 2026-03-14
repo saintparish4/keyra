@@ -110,10 +110,11 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design decis
 **Step 1 — Start LocalStack (DynamoDB + Kinesis emulation)**
 
 ```bash
-docker-compose up -d
+make start
+# or: docker-compose up -d --build localstack
 ```
 
-Expected output: LocalStack container starts; the init script creates the DynamoDB tables and Kinesis stream automatically.
+Expected output: LocalStack container starts; the init script creates the DynamoDB tables and Kinesis stream automatically. The LocalStack image is built from `localstack.Dockerfile`, which installs scripts from `localstack-init/` (`init-aws.sh` creates the tables and stream; `keyra-entrypoint.sh` runs at container start). If you see `FileNotFoundError: ... init-aws.sh`, run `make start-clean` to rebuild the LocalStack image and try again.
 
 **Step 2 — Verify the service is alive**
 

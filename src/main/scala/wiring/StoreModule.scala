@@ -38,6 +38,16 @@ object StoreModule:
                   metrics,
                 )
               yield store
+            case "sliding-window" =>
+              for
+                client <- AwsClients
+                  .dynamoDbClient[F](config.aws, config.dynamodb)
+                store = DynamoDBSlidingWindowStore[F](
+                  client,
+                  config.dynamodb.rateLimitTable,
+                  metrics,
+                )
+              yield store
             case _ =>
               for
                 client <- AwsClients

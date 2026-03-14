@@ -388,6 +388,8 @@ All error responses follow this format:
 
 ## Rate Limit Algorithm
 
+**Response headers and `resetAt`:** The API passes the `resetAt` value from the rate-limit store (token bucket, leaky-bucket, or sliding-window) into the JSON body and the `X-RateLimit-Reset` header. Each store returns the correct reset instant for its algorithm; the API does not need algorithm-specific handling — "epoch seconds at which capacity resets" is algorithm-agnostic.
+
 ### Token Bucket
 
 Currently implemented algorithm. Tokens refill at a constant rate.

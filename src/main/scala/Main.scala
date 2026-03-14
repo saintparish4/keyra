@@ -34,6 +34,9 @@ object Main extends IOApp:
       _ <- Resource
         .eval(summon[Logger[IO]].info(s"Configuration loaded: ${config.server
             .host}:${config.server.port}"))
+      _ <- Resource.eval(summon[Logger[IO]].info(s"AWS: localstack=${config.aws
+          .localstack}, dynamodbEndpoint=${config.aws.dynamodbEndpoint
+          .getOrElse("(none)")}"))
 
       obs <- ObservabilityModule.resource[IO](config)
       _ <- Resource.eval(summon[Logger[IO]].info("Observability initialized"))

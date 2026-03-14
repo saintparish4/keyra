@@ -20,7 +20,7 @@ object ObservabilityModule:
       config: AppConfig,
   ): Resource[F, ObservabilityModule[F]] =
     for
-      basePublisher <- config.metrics.enabled match
+      basePublisher <- (config.metrics.enabled && !config.aws.localstack) match
         case true =>
           val metricsConfig = MetricsConfig(
             namespace = config.metrics.namespace,

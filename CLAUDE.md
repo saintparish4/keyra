@@ -18,7 +18,9 @@
 /loadSim/                - Load simulation subproject (sbt loadSim/run)
 /terraform/              - AWS infra (DynamoDB, Kinesis, ECS Fargate, ALB)
 /docs/                   - API reference, architecture
-/scripts/                - load-test.sh (k6), localstack-init
+/scripts/                - load-test.sh (k6)
+/localstack-init/        - Init scripts for LocalStack (init-aws.sh, keyra-entrypoint.sh)
+localstack.Dockerfile    - Builds LocalStack image with keyra init; used by docker-compose
 ```
 
 ## Technology Stack

@@ -1,7 +1,10 @@
-.PHONY: help start stop logs run test integration status clean \
+.PHONY: help start start-clean stop logs run test integration status clean \
        docker-build docker-run docker-run-detached docker-stop docker-logs \
-       curl-check curl-status curl-health curl-ready all-tests dev docker-restart \
+       curl-check curl-status curl-health curl-ready all-tests dev dev-docker docker-restart \
        tf-validate
+
+# Unique suffix per make invocation (for curl-check key). Works when recipe shell lacks date +%s (e.g. Windows).
+CURL_CHECK_ID := $(shell date +%s 2>/dev/null || echo $$RANDOM 2>/dev/null || echo 0)
 
 # Default target
 .DEFAULT_GOAL := help
@@ -11,10 +14,12 @@ help: ## Show this help message
 	@echo ""
 	@echo "Local Development (sbt + LocalStack):"
 	@echo "  make start        Start LocalStack only (for sbt development)"
+	@echo "  make start-clean  Rebuild LocalStack image (no cache) then start"
 	@echo "  make stop         Stop LocalStack"
 	@echo "  make logs         Follow LocalStack logs"
 	@echo "  make run          Run the application with sbt (requires LocalStack)"
 	@echo "  make dev          Start LocalStack + run app with sbt"
+	@echo "  make dev-docker   Start LocalStack + run app in Docker (no sbt)"
 	@echo "  make test         Run unit tests"
 	@echo "  make integration  Run integration tests"
 	@echo "  make status       Check LocalStack and AWS resource status"
@@ -29,7 +34,7 @@ help: ## Show this help message
 	@echo "  make docker-restart       Restart Docker stack"
 	@echo ""
 	@echo "API Testing:"
-	@echo "  make curl-check   Test POST /v1/ratelimit/check"
+	@echo "  make curl-check   Smoke test: 100 requests, verify X-RateLimit-* headers"
 	@echo "  make curl-status  Test GET /v1/ratelimit/status/:key"
 	@echo "  make curl-health  Test GET /health"
 	@echo "  make curl-ready   Test GET /ready"
@@ -43,7 +48,12 @@ help: ## Show this help message
 
 start: ## Start LocalStack only (for sbt development)
 	@echo "Starting LocalStack..."
-	docker-compose up -d localstack
+	docker-compose up -d --build localstack
+
+start-clean: ## Rebuild LocalStack image without cache, then start (use if init script is missing)
+	@echo "Rebuilding LocalStack image (no cache)..."
+	docker-compose build --no-cache localstack
+	@$(MAKE) start
 	@echo "Waiting for LocalStack to be ready..."
 	@timeout=120; \
 	while [ $$timeout -gt 0 ]; do \
@@ -73,8 +83,9 @@ run: ## Run the application with sbt (requires LocalStack)
 	@echo ""
 	@command -v sbt >/dev/null 2>&1 || { \
 		echo "Error: sbt not found in PATH."; \
-		echo "Install sbt: https://www.scala-sbt.org/download.html"; \
-		echo "Or use Docker: make docker-run"; \
+		echo "  Install sbt: https://www.scala-sbt.org/download.html"; \
+		echo "  Or run app in Docker: make dev-docker   (LocalStack + app, no sbt)"; \
+		echo "  Or full stack:         make docker-run"; \
 		exit 1; \
 	}
 	USE_LOCALSTACK=true \
@@ -86,6 +97,10 @@ run: ## Run the application with sbt (requires LocalStack)
 	sbt run
 
 dev: start run ## Start LocalStack and run the application with sbt
+
+dev-docker: start ## Start LocalStack, then run the app in Docker (no sbt required)
+	@echo "Starting rate-limiter container (LocalStack already running)..."
+	docker-compose up --build rate-limiter
 
 test: ## Run unit tests
 	@echo "Running unit tests..."
@@ -171,14 +186,30 @@ docker-restart: docker-stop docker-run ## Restart Docker stack
 # API Testing
 # =============================================================================
 
-curl-check: ## Test POST /v1/ratelimit/check
-	@echo "Testing rate limit check endpoint..."
-	@curl -s -X POST http://localhost:8080/v1/ratelimit/check \
-		-H "Content-Type: application/json" \
-		-H "Authorization: Bearer test-api-key" \
-		-d '{"key":"user:123","cost":1}' | python3 -m json.tool 2>/dev/null || \
-		(echo "Error: Service not available at http://localhost:8080" && \
-		 echo "Start with: make dev  OR  make docker-run")
+curl-check: ## Smoke test: 100 requests, verify X-RateLimit-* headers
+	@echo "Smoke test: sending 100 requests, verifying X-RateLimit-* headers..."
+	@key="smoke-$(CURL_CHECK_ID)-$$$$"; \
+	first_headers="/tmp/curl-check-headers.$$$$"; \
+	first_status="/tmp/curl-check-status.$$$$"; \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100; do \
+	  if [ "$$i" = "1" ]; then \
+	    curl -s -D "$$first_headers" -w "%{http_code}" -o /dev/null -X POST http://localhost:8080/v1/ratelimit/check \
+	      -H "Content-Type: application/json" \
+	      -H "Authorization: Bearer test-api-key" \
+	      -d "{\"key\":\"$$key\",\"cost\":1}" > "$$first_status" || { echo "Error: Service not available at http://localhost:8080"; echo "Start with: make dev  OR  make docker-run"; rm -f "$$first_headers" "$$first_status"; exit 1; }; \
+	  else \
+	    curl -s -o /dev/null -X POST http://localhost:8080/v1/ratelimit/check \
+	      -H "Content-Type: application/json" \
+	      -H "Authorization: Bearer test-api-key" \
+	      -d "{\"key\":\"$$key\",\"cost\":1}" || { echo "Error: Service not available"; rm -f "$$first_headers" "$$first_status"; exit 1; }; \
+	  fi; \
+	done; \
+	read code < "$$first_status"; \
+	[ "$$code" = "000" ] && { echo "Error: Service not available"; rm -f "$$first_headers" "$$first_status"; exit 1; }; \
+	[ "$$code" != "200" ] && { echo "FAIL: First request returned HTTP $$code (expected 200). X-RateLimit-* headers only appear on allowed responses."; rm -f "$$first_headers" "$$first_status"; exit 1; }; \
+	grep -qi 'X-RateLimit-Limit' "$$first_headers" && grep -qi 'X-RateLimit-Remaining' "$$first_headers" && grep -qi 'X-RateLimit-Reset' "$$first_headers" || { echo "FAIL: Missing X-RateLimit-* headers (first response was 200)"; rm -f "$$first_headers" "$$first_status"; exit 1; }; \
+	rm -f "$$first_headers" "$$first_status"; \
+	echo "Smoke test OK: 100 requests sent, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset verified."
 
 curl-status: ## Test GET /v1/ratelimit/status/:key
 	@echo "Testing rate limit status endpoint..."

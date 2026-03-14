@@ -1,17 +1,21 @@
 services:
   localstack:
-    image: localstack/localstack
+    build:
+      context: .
+      dockerfile: localstack.Dockerfile
     ports:
-      - "4566:4566" # LocalStack Gateway 
+      - "4566:4566" # LocalStack Gateway
       - "4510-4519:4510-4519" # External services port range
     environment:
       - SERVICES=dynamodb,kinesis,cloudwatch
       - DEBUG=1
-      - PERSISTENCE=1 
-      - DOCKER_HOST=unix:///var/run/docker.sock 
+      - PERSISTENCE=1
+      - DOCKER_HOST=unix:///var/run/docker.sock
     volumes:
-      - "./localstack-init:/etc/localstack/init/ready.d"
-      - "localstack-data:/var/lib/localstack" 
+      # Init script is installed at runtime by keyra-entrypoint.sh (see
+      # localstack.Dockerfile) so it is present even if the base image
+      # overwrites /etc/localstack/init (e.g. anonymous volume).
+      - "localstack-data:/var/lib/localstack"
       - "/var/run/docker.sock:/var/run/docker.sock" 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
@@ -33,6 +37,7 @@ services:
       - SERVER_PORT=8080
       - AWS_REGION=us-east-1
       - USE_LOCALSTACK=true
+      - AWS_ENDPOINT=http://localstack:4566
       - DYNAMODB_ENDPOINT=http://localstack:4566
       - KINESIS_ENDPOINT=http://localstack:4566
       - AWS_ACCESS_KEY_ID=test
@@ -45,6 +50,9 @@ services:
       - TRACING_ENABLED=true
       - OTEL_SERVICE_NAME=keyra
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      # Local dev: fail-open so a tripped circuit breaker doesn't block the smoke test.
+      # Production uses reject-all (the application.conf default).
+      - DEGRADATION_MODE=allow-all
     depends_on:
       localstack:
         condition: service_healthy
