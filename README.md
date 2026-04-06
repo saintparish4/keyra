@@ -6,6 +6,14 @@
 
 A distributed rate limiter, idempotency service, and token quota engine built with Scala 3, Cats Effect, and DynamoDB. Enforces per-key request limits and multi-level LLM token quotas correctly across multiple stateless instances — without a lock service.
 
+### Why Keyra?
+
+- **Public or partner APIs** — Enforce per-tenant RPS and burst limits across many stateless containers with one source of truth in DynamoDB ([token bucket + OCC](#optimistic-concurrency-control-flow)).
+- **AI / LLM gateways** — Stack rate limits with multi-level token quotas (user / agent / org) so spend and abuse stay bounded ([`POST /v1/quota/check`](#api-endpoints) when enabled with `TOKEN_QUOTA_ENABLED=true`; see [Token quotas](#token-quotas-ai-workloads)).
+- **Money-moving or side-effecting workflows** — Idempotency keys so retries and double-clicks do not double-charge or double-ship ([`/v1/idempotency/*`](#api-endpoints); [behaviour](#idempotency)).
+
+Run locally with LocalStack; see [Quickstart](#quickstart-in-5-minutes) below.
+
 ### What this system guarantees
 
 | Guarantee | Mechanism |
