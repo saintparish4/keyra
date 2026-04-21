@@ -1,5 +1,6 @@
 package api
 
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 
 import org.http4s.*
@@ -7,10 +8,13 @@ import org.http4s.circe.*
 import org.http4s.circe.CirceEntityDecoder.*
 import org.http4s.circe.CirceEntityEncoder.*
 import org.http4s.dsl.Http4sDsl
+import org.http4s.Charset
 import org.http4s.headers.`Content-Type`
 import org.http4s.server.{AuthMiddleware, Router}
 import org.typelevel.log4cats.Logger
 import org.typelevel.otel4s.trace.Tracer
+
+import fs2.Stream
 
 import cats.effect.*
 import cats.effect.std.Queue
@@ -72,13 +76,31 @@ class Routes[F[_]: Async: Tracer](
     case GET -> Root / "health" =>
       Ok(HealthResponse("healthy", BuildInfo.version).asJson)
 
-    // Prometheus metrics scrape endpoint
+    // Prometheus metrics scrape endpoint.
+    //
+    // We build the response by writing raw UTF-8 bytes to the body stream
+    // instead of `withEntity(body)` / `Ok(body)`. The wildcard
+    // `org.http4s.circe.CirceEntityEncoder.*` import in this file otherwise
+    // resolves an `EntityEncoder[F, String]` that JSON-encodes the payload
+    // (wrapping it in quotes and escaping newlines), which Prometheus
+    // rejects with: expected a valid start token, got "\"".
     case GET -> Root / "metrics" => prometheusMetrics match
-        case Some(prom) => prom.scrape.flatMap(body =>
-            Ok(body).map(_.withContentType(`Content-Type`(
-              org.http4s.MediaType.text.plain,
-            ))),
-          )
+        case Some(prom) =>
+          prom.scrape.map { body =>
+            val bytes = body.getBytes(StandardCharsets.UTF_8)
+            Response[F](status = Status.Ok)
+              .withBodyStream(Stream.emits(bytes).covary[F])
+              .withContentType(
+                `Content-Type`(
+                  org.http4s.MediaType.text.plain,
+                  Charset.`UTF-8`,
+                ),
+              )
+              .putHeaders(
+                org.http4s.headers.`Content-Length`
+                  .unsafeFromLong(bytes.length.toLong),
+              )
+          }
         case None => NotFound()
 
     // Readiness probe - aggregated dependency health
