@@ -208,12 +208,41 @@ case class CacheConfig(
     recordStats: Boolean = true,
 ) derives ConfigReader
 
-/** Audit trail configuration for PCI DSS 4.0.1 compliance. */
+/** Audit trail configuration for PCI DSS 4.0.1 compliance.
+  *
+  * NOTE: PureConfig's Scala 3 derivation uses a fixed camelCase→kebab-case
+  * field mapping and converts `s3Prefix` into `s-3-prefix` (digits start a
+  * new "word"), which doesn't match the `s3-prefix` key in application.conf.
+  * Without the explicit reader below, `ConfigSource.default.loadOrThrow`
+  * fails and the service silently falls back to `loadOrDefault`, discarding
+  * every `${?ENV}` override in the HOCON file — a very expensive silent
+  * failure (it made `AUTH_RATE_LIMIT_PER_MINUTE` look broken during load
+  * tests).
+  */
 case class AuditConfig(
     enabled: Boolean = true,
     retentionYears: Int = 7,
     s3Prefix: String = "audit/",
-) derives ConfigReader
+)
+
+object AuditConfig:
+  private def readOpt[A: ConfigReader](
+      obj: ConfigObjectCursor,
+      key: String,
+      default: A,
+  ): ConfigReader.Result[A] =
+    val c = obj.atKeyOrUndefined(key)
+    if c.isUndefined then Right(default) else ConfigReader[A].from(c)
+
+  given ConfigReader[AuditConfig] = ConfigReader.fromCursor { cur =>
+    cur.asObjectCursor.flatMap { obj =>
+      for
+        enabled   <- readOpt[Boolean](obj, "enabled", true)
+        retention <- readOpt[Int](obj, "retention-years", 7)
+        prefix    <- readOpt[String](obj, "s3-prefix", "audit/")
+      yield AuditConfig(enabled, retention, prefix)
+    }
+  }
 
 // Root application configuration
 case class AppConfig(

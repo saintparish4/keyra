@@ -46,13 +46,20 @@ services:
       - IDEMPOTENCY_TABLE=idempotency
       - KINESIS_STREAM=rate-limit-events
       - KINESIS_ENABLED=true
-      # OpenTelemetry: send traces to Jaeger on host (e.g. docker run -p 4317:4317 jaegertracing/all-in-one)
+      # OpenTelemetry: traces go to the `jaeger` service under the `obs`
+      # profile (`docker compose --profile obs up`). Without the obs profile
+      # the DNS name does not resolve and OTel exporter logs are silent/ignored.
       - TRACING_ENABLED=true
       - OTEL_SERVICE_NAME=keyra
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4317}
       # Local dev: fail-open so a tripped circuit breaker doesn't block the smoke test.
       # Production uses reject-all (the application.conf default).
       - DEGRADATION_MODE=allow-all
+      # Meta auth rate limit (per API key, per minute) — raised for load tests
+      # and CI so the single shared `test-api-key` isn't throttled by the
+      # anti-abuse counter the auth middleware uses against brute-force
+      # key-guessing. Production keeps the default (1000).
+      - AUTH_RATE_LIMIT_PER_MINUTE=10000000
     depends_on:
       localstack:
         condition: service_healthy
@@ -65,8 +72,62 @@ services:
     networks:
       - rate-limiter-network
 
+  # Observability stack — start with `docker compose --profile obs up`.
+  # Runs alongside the base services; Prometheus scrapes the app's /metrics
+  # endpoint and Grafana is auto-provisioned with the Keyra dashboard.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: ["obs"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=24h"
+    depends_on:
+      - rate-limiter
+    networks:
+      - rate-limiter-network
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    profiles: ["obs"]
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_USERS_DEFAULT_THEME=dark
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - rate-limiter-network
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    profiles: ["obs"]
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - rate-limiter-network
+
 volumes:
   localstack-data:
+  prometheus-data:
+  grafana-data:
 
 networks:
   rate-limiter-network:

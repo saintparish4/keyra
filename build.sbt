@@ -90,5 +90,6 @@ lazy val loadSim = project.in(file("loadSim")).settings(
     "io.circe" %% "circe-generic" % CirceVersion,
     "io.circe" %% "circe-parser" % CirceVersion,
     "ch.qos.logback" % "logback-classic" % "1.5.19" % Runtime,
+    "org.hdrhistogram" % "HdrHistogram" % "2.2.2",
   ),
 )

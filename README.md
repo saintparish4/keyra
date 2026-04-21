@@ -255,6 +255,39 @@ Returns metrics in Prometheus text exposition format: `keyra_requests_total`, `k
 
 See **[API Reference](docs/API.md)** for full request/response schemas.
 
+## Operating Keyra
+
+The `obs` Docker Compose profile stands up Prometheus, Grafana (auto-provisioned with the Keyra dashboard), and Jaeger alongside the running service.
+
+```bash
+docker compose --profile obs up -d
+```
+
+| Tool        | URL                              | Purpose                                   |
+|-------------|----------------------------------|-------------------------------------------|
+| Grafana     | <http://localhost:3000>          | `admin` / `admin`; "Keyra — Rate Limiting & Quotas" dashboard |
+| Prometheus  | <http://localhost:9090>          | Raw metric explorer, scrape targets       |
+| Jaeger      | <http://localhost:16686>         | Distributed traces (service `keyra`)      |
+
+Dashboard source: [`observability/grafana/dashboards/keyra.json`](observability/grafana/dashboards/keyra.json). Panels cover request rate by result, rate-limit check p50/p95/p99, DynamoDB latency by operation, circuit breaker state, token consumption, and Kinesis publish vs drop.
+
+![Keyra Grafana dashboard](docs/images/grafana-dashboard.png)
+
+> Screenshot placeholder — run `docker compose --profile obs up -d`, drive a few seconds of traffic with `sbt "loadSim/run --scenario normal"`, capture the dashboard, and save it at `docs/images/grafana-dashboard.png`. No build step reads this file; it is purely documentation.
+
+For reproducible latency numbers at fixed RPS and a DynamoDB cost-per-decision breakdown, see [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+
+A committed exemplar OTel trace lives at [`docs/exemplar-trace.json`](docs/exemplar-trace.json) (regenerate with [`scripts/export-exemplar-trace.sh`](scripts/export-exemplar-trace.sh) after starting the `obs` profile). It shows the HTTP → auth → token-bucket → DynamoDB GetItem/PutItem → Kinesis publish path for one `/v1/ratelimit/check` request.
+
+### Correctness proof in CI
+
+Every PR runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml) → `correctness` job, which spins up the full stack and asserts two invariants via `sbt "loadSim/run --scenario correctness"`:
+
+- **Token-bucket non-over-issue** — under 50-way parallel load on a single key, `allowed_count <= capacity + refillRate * duration + 2` (epsilon for clock skew). Direct proof of the "tokens never exceed capacity" guarantee.
+- **Idempotency exactly-one-Created** — under 50-way parallel load on K=10 shared keys, exactly K `status=new` responses, zero 409 conflicts, zero HTTP errors. Exercises the conditional `PutItem` + TOCTOU retry path.
+
+A violation fails the build. Scenario source: [`loadSim/src/main/scala/LoadSim.scala`](loadSim/src/main/scala/LoadSim.scala) (`Scenarios.correctness`).
+
 ## Infrastructure / Deploy
 
 Terraform provisions the following AWS resources ([`terraform/`](terraform/)):
@@ -664,6 +697,8 @@ See [Benchmark Results](#benchmark-results) for observed numbers from each scena
 <a name="benchmark-results"></a>
 
 ## Benchmark Results
+
+> For **fixed-RPS latency numbers** (p50/p95/p99 at a stated input RPS) and a DynamoDB cost-per-decision breakdown, see [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). The numbers below are from ad-hoc runs at whatever RPS the loop produced and are kept for the OCC-contention story (Scenario 2), not as authoritative throughput figures.
 
 > Numbers are from local testing with LocalStack + Docker on a 6-core dev machine. AWS production performance will differ based on region and DynamoDB configuration.
 

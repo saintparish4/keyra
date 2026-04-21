@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  external_labels:
+    app: keyra
+    env: local
+
+scrape_configs:
+  - job_name: keyra
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["rate-limiter:8080"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
